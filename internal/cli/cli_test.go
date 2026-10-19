@@ -342,6 +342,135 @@ func TestInstallDryRunIntoZedDir(t *testing.T) {
 	}
 }
 
+func TestParseRunArgsFlags(t *testing.T) {
+	tests := []struct {
+		name     string
+		args     []string
+		wantFile string
+		wantProg []string
+		check    func(t *testing.T, f runFlags)
+	}{
+		{
+			name:     "release",
+			args:     []string{"main.go", "--release"},
+			wantFile: "main.go",
+			check: func(t *testing.T, f runFlags) {
+				if !f.release {
+					t.Fatal("--release not set")
+				}
+			},
+		},
+		{
+			name:     "dry-run",
+			args:     []string{"main.go", "--dry-run"},
+			wantFile: "main.go",
+			check: func(t *testing.T, f runFlags) {
+				if !f.dryRun {
+					t.Fatal("--dry-run not set")
+				}
+			},
+		},
+		{
+			name:     "verbose",
+			args:     []string{"main.go", "-v"},
+			wantFile: "main.go",
+			check: func(t *testing.T, f runFlags) {
+				if !f.verbose {
+					t.Fatal("-v not set")
+				}
+			},
+		},
+		{
+			name:     "tool",
+			args:     []string{"main.go", "--tool", "go1.22"},
+			wantFile: "main.go",
+			check: func(t *testing.T, f runFlags) {
+				if f.tool != "go1.22" {
+					t.Fatalf("--tool = %q, want go1.22", f.tool)
+				}
+			},
+		},
+		{
+			name:     "build-dir",
+			args:     []string{"main.go", "--build-dir", "/tmp/build"},
+			wantFile: "main.go",
+			check: func(t *testing.T, f runFlags) {
+				if f.buildDir != "/tmp/build" {
+					t.Fatalf("--build-dir = %q, want /tmp/build", f.buildDir)
+				}
+			},
+		},
+		{
+			name:     "timeout duration",
+			args:     []string{"main.go", "--timeout", "500ms"},
+			wantFile: "main.go",
+			check: func(t *testing.T, f runFlags) {
+				if f.timeout != 500*time.Millisecond {
+					t.Fatalf("--timeout = %v, want 500ms", f.timeout)
+				}
+			},
+		},
+		{
+			name:     "timeout seconds",
+			args:     []string{"main.go", "--timeout", "30"},
+			wantFile: "main.go",
+			check: func(t *testing.T, f runFlags) {
+				if f.timeout != 30*time.Second {
+					t.Fatalf("--timeout = %v, want 30s", f.timeout)
+				}
+			},
+		},
+		{
+			name:     "double-dash passthrough",
+			args:     []string{"main.go", "--", "--flag", "value"},
+			wantFile: "main.go",
+			wantProg: []string{"--flag", "value"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			file, prog, flags, err := parseRunArgs(tt.args)
+			if err != nil {
+				t.Fatalf("parseRunArgs error: %v", err)
+			}
+			if file != tt.wantFile {
+				t.Fatalf("file = %q, want %q", file, tt.wantFile)
+			}
+			if strings.Join(prog, "|") != strings.Join(tt.wantProg, "|") {
+				t.Fatalf("progArgs = %v, want %v", prog, tt.wantProg)
+			}
+			if tt.check != nil {
+				tt.check(t, flags)
+			}
+		})
+	}
+}
+
+func TestParseRunArgsFlagErrors(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "unknown flag", args: []string{"main.go", "--nope"}, want: "unknown flag"},
+		{name: "tool missing value", args: []string{"main.go", "--tool"}, want: "needs a value"},
+		{name: "timeout missing value", args: []string{"main.go", "--timeout"}, want: "needs a value"},
+		{name: "build-dir missing value", args: []string{"main.go", "--build-dir"}, want: "needs a value"},
+		{name: "bad timeout", args: []string{"main.go", "--timeout", "abc"}, want: "bad --timeout"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, _, _, err := parseRunArgs(tt.args)
+			if err == nil {
+				t.Fatalf("expected error for %v", tt.args)
+			}
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("error = %q, want it to contain %q", err, tt.want)
+			}
+		})
+	}
+}
+
 func TestVersionFlag(t *testing.T) {
 	code, out, _ := run(t, testOpts(t), "--version")
 	if code != 0 || !strings.Contains(out, "zedrun-go") {

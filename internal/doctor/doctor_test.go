@@ -95,6 +95,21 @@ func TestCollectIsJSONSerialisable(t *testing.T) {
 	}
 }
 
+func TestProblemsMarshalAsEmptySlice(t *testing.T) {
+	home := t.TempDir()
+	e := env("HOME", home, "XDG_CONFIG_HOME", filepath.Join(home, ".config"),
+		"XDG_CACHE_HOME", filepath.Join(home, ".cache"),
+		"XDG_DATA_HOME", filepath.Join(home, ".local", "share"))
+	d := Collect(config.Default(), nil, e, "linux", nil)
+	b, err := json.Marshal(d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"problems":[]`) {
+		t.Fatalf("an empty report must still marshal problems as [], got: %s", b)
+	}
+}
+
 func TestCollectSystemSection(t *testing.T) {
 	report := Collect(config.Default(), nil, env("HOME", "/home/z", "XDG_CONFIG_HOME", "/home/z/.config"), "linux", nil)
 	sys, ok := report["system"].(map[string]any)

@@ -62,12 +62,28 @@ func NewModel(rows []LangRow, cfg config.Config, opts Options) Model {
 func (m Model) Width() int  { return m.w }
 func (m Model) Height() int { return m.h }
 
-// Init satisfies tea.Model.
-func (m Model) Init() tea.Cmd { return nil }
+// rowsMsg carries a finished toolchain scan into the model.
+type rowsMsg []LangRow
+
+// Init kicks off the toolchain scan in the background, so the dashboard draws
+// immediately instead of blocking for seconds while every language is resolved.
+func (m Model) Init() tea.Cmd {
+	if m.Rows != nil {
+		return nil
+	}
+	cfg, opts := m.cfg, m.opts
+	return func() tea.Msg { return rowsMsg(Rows(cfg, opts)) }
+}
 
 // Update handles keys and window resizes.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case rowsMsg:
+		m.Rows = []LangRow(msg)
+		if m.Cursor >= len(m.Rows) {
+			m.Cursor = 0
+		}
+		return m, nil
 	case tea.WindowSizeMsg:
 		m.w, m.h = msg.Width, msg.Height
 		return m, nil
@@ -114,6 +130,11 @@ func (m Model) View() string {
 	b.WriteString(dim.Render(fmt.Sprintf("%s · %d languages · %s channel", m.osName(), len(m.Rows), m.channelLabel())))
 	b.WriteString("\n\n")
 
+	if m.Rows == nil {
+		b.WriteString(dim.Render("  scanning toolchains…"))
+		b.WriteString("\n")
+	}
+
 	for i, r := range m.Rows {
 		line := fmt.Sprintf("  %-12s %s", r.Language, r.Default)
 		if i == m.Cursor {
@@ -136,9 +157,10 @@ func (m Model) View() string {
 	return b.String()
 }
 
-// Run starts the dashboard. It returns the exit code to use.
+// Run starts the dashboard. It returns the exit code to use. The toolchain scan
+// runs inside the program, so the first frame is on screen immediately.
 func Run(cfg config.Config, opts Options) (int, error) {
-	m := NewModel(Rows(cfg, opts), cfg, opts)
+	m := NewModel(nil, cfg, opts)
 	if _, err := tea.NewProgram(m, tea.WithAltScreen()).Run(); err != nil {
 		return 1, err
 	}
@@ -161,11 +183,17 @@ func Rows(cfg config.Config, opts Options) []LangRow {
 	if osName == "" {
 		osName = platform.OSName("")
 	}
+	// Resolving every language is the most expensive thing the tool does; always
+	// run it against a cache so the directory listings are shared across tools.
+	cache := opts.Cache
+	if cache == nil {
+		cache = detect.NewProbeCache("")
+	}
 
 	rows := make([]LangRow, 0, len(keys))
 	for _, k := range keys {
 		def := "-"
-		if res, err := planner.Resolve(k, "", cfg, opts.Cache, "", env, osName, nil); err == nil {
+		if res, err := planner.Resolve(k, "", cfg, cache, "", env, osName, nil); err == nil {
 			def = res.Install.Tool
 		}
 		rows = append(rows, LangRow{Language: k, Default: def})

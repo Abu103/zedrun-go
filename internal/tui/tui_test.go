@@ -1,11 +1,13 @@
 package tui
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/zedrun/zedrun-go/internal/catalog"
 	"github.com/zedrun/zedrun-go/internal/config"
 )
 
@@ -151,5 +153,75 @@ func TestWindowSizeIsStored(t *testing.T) {
 	mm := updated.(Model)
 	if mm.Width() != 100 || mm.Height() != 40 {
 		t.Fatalf("size = (%d,%d), want (100,40)", mm.Width(), mm.Height())
+	}
+}
+
+// isolatedOpts keeps the background scan off the real filesystem.
+func isolatedOpts(t *testing.T) Options {
+	t.Helper()
+	home := t.TempDir()
+	return Options{
+		Env: map[string]string{
+			"HOME": home, "PATH": filepath.Join(home, "empty"),
+			"XDG_CONFIG_HOME": filepath.Join(home, ".config"),
+			"XDG_CACHE_HOME":  filepath.Join(home, ".cache"),
+			"XDG_DATA_HOME":   filepath.Join(home, ".local", "share"),
+		},
+		OS: "linux",
+	}
+}
+
+func TestInitScansInTheBackground(t *testing.T) {
+	m := NewModel(nil, config.Default(), isolatedOpts(t))
+	if !strings.Contains(m.View(), "scanning") {
+		t.Fatalf("the view does not say it is scanning before the rows arrive:\n%s", m.View())
+	}
+	cmd := m.Init()
+	if cmd == nil {
+		t.Fatal("Init returned no command, so the table would never load")
+	}
+	updated, _ := m.Update(cmd())
+	mm := updated.(Model)
+	if len(mm.Rows) != len(catalog.Languages) {
+		t.Fatalf("after the scan the table has %d rows, want %d", len(mm.Rows), len(catalog.Languages))
+	}
+	if strings.Contains(mm.View(), "scanning") {
+		t.Fatal("the view still says it is scanning after the rows arrived")
+	}
+}
+
+func TestInitIsNoOpWhenRowsAreSupplied(t *testing.T) {
+	m := NewModel(rows(), config.Default(), Options{})
+	if cmd := m.Init(); cmd != nil {
+		t.Fatal("Init returned a command even though rows were already supplied")
+	}
+}
+
+func TestRowsMsgFillsTheTable(t *testing.T) {
+	m := NewModel(nil, config.Default(), Options{})
+	updated, _ := m.Update(rowsMsg([]LangRow{{Language: "c", Default: "gcc"}}))
+	mm := updated.(Model)
+	if len(mm.Rows) != 1 || mm.Rows[0].Language != "c" {
+		t.Fatalf("Rows = %+v", mm.Rows)
+	}
+}
+
+func TestCursorResetsWhenRowsShrink(t *testing.T) {
+	m := NewModel(rows(), config.Default(), Options{})
+	m, _ = send(t, m, "down")
+	m, _ = send(t, m, "down")
+	updated, _ := m.Update(rowsMsg([]LangRow{{Language: "c", Default: "gcc"}}))
+	if got := updated.(Model).Cursor; got != 0 {
+		t.Fatalf("cursor = %d, want 0 after the table shrank under it", got)
+	}
+}
+
+func TestKeysAreSafeBeforeTheScanFinishes(t *testing.T) {
+	m := NewModel(nil, config.Default(), Options{})
+	for _, k := range []string{"down", "up", "t", "p"} {
+		updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(k)})
+		if _, ok := updated.(Model); !ok {
+			t.Fatalf("key %q broke the model before the scan finished", k)
+		}
 	}
 }

@@ -9,6 +9,7 @@ import (
 
 	"github.com/zedrun/zedrun-go/internal/catalog"
 	"github.com/zedrun/zedrun-go/internal/config"
+	"github.com/zedrun/zedrun-go/internal/platform"
 )
 
 func env(pairs ...string) map[string]string {
@@ -117,6 +118,31 @@ func TestGccClangBannerNoted(t *testing.T) {
 	inst := Probe(catalog.GetTool("gcc"), p, nil, 5*time.Second)
 	if inst.Note != "is clang" {
 		t.Fatalf("Note = %q, want \"is clang\"", inst.Note)
+	}
+}
+
+func TestCandidatePathsWithSharedCacheMatchesUncached(t *testing.T) {
+	home := t.TempDir()
+	bin := filepath.Join(home, "bin")
+	if err := os.MkdirAll(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bin, "gcc"), []byte("x"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	tool := catalog.Tool{ID: "c", Names: []string{"gcc"}}
+	cfg := config.Default()
+	cfg.Paths["c"] = filepath.Join(bin, "gcc")
+	e := env()
+	e["PATH"] = filepath.Join(home, "empty")
+
+	want := CandidatePaths(tool, cfg, e, "linux")
+	got := CandidatePathsWith(tool, cfg, e, "linux", platform.NewDirCache())
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("cached = %v, want the same as uncached %v", got, want)
+	}
+	if len(want) == 0 || !strings.HasSuffix(want[0], "bin/gcc") {
+		t.Fatalf("the pinned path must come first, got %v", want)
 	}
 }
 

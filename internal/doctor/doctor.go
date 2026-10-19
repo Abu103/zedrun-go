@@ -43,7 +43,9 @@ func Collect(cfg config.Config, cache *detect.ProbeCache, env map[string]string,
 		},
 	}
 
-	var problems []string
+	// Initialised, not nil: an empty report must marshal as [] rather than null,
+	// so a JSON consumer can always index it.
+	problems := []string{}
 	toolRows := []any{}
 	for _, id := range tools {
 		installs := detect.FindInstalls(catalog.GetTool(id), cfg, cache, true, env, osOverride)

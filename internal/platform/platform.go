@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 )
 
 // LowPriority origins sort last when several installs of one tool are found:
@@ -163,13 +164,109 @@ func ExeExts(env map[string]string, osOverride string) []string {
 }
 
 // FindInDir returns the existing, executable files in dir matching one of names
-// with any OS executable extension, in name order.
+// with any OS executable extension, in name order. It stats each candidate.
 func FindInDir(dir string, names []string, env map[string]string, osOverride string) []string {
+	return FindInDirCached(dir, names, env, osOverride, nil)
+}
+
+// dirListing is one memoised directory listing: folded name -> name on disk.
+type dirListing struct {
+	byKey map[string]string
+	ok    bool
+}
+
+// DirCache memoises directory listings. Probing one tool stats every candidate
+// name in every search directory; probing thirty tools does it thirty times over,
+// which on a WSL machine with a Windows PATH (dozens of /mnt entries) costs
+// seconds. Listing each directory once and matching names in memory turns that
+// into one readdir per directory per run.
+//
+// The cache is scoped to a run: a tool installed mid-run is not seen until the
+// next one.
+type DirCache struct {
+	mu sync.Mutex
+	m  map[string]dirListing
+}
+
+// NewDirCache returns an empty per-run listing cache.
+func NewDirCache() *DirCache {
+	return &DirCache{m: map[string]dirListing{}}
+}
+
+// List returns the regular-file entries of dir as folded-name -> real-name.
+// fold lowercases the keys, for case-insensitive filesystems.
+func (c *DirCache) List(dir string, fold bool) (map[string]string, bool) {
+	c.mu.Lock()
+	if l, ok := c.m[dir]; ok {
+		c.mu.Unlock()
+		return l.byKey, l.ok
+	}
+	c.mu.Unlock()
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		c.mu.Lock()
+		c.m[dir] = dirListing{ok: false}
+		c.mu.Unlock()
+		return nil, false
+	}
+	byKey := make(map[string]string, len(entries))
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		key := name
+		if fold {
+			key = strings.ToLower(name)
+		}
+		byKey[key] = name
+	}
+	c.mu.Lock()
+	c.m[dir] = dirListing{byKey: byKey, ok: true}
+	c.mu.Unlock()
+	return byKey, true
+}
+
+// FindInDirCached is FindInDir backed by a shared listing cache. With a nil
+// cache it behaves exactly like FindInDir.
+func FindInDirCached(dir string, names []string, env map[string]string, osOverride string, dc *DirCache) []string {
 	o := OSName(osOverride)
+	fold := o == "windows"
+	exts := ExeExts(env, o)
+
+	if dc != nil {
+		entries, ok := dc.List(dir, fold)
+		if !ok {
+			return nil
+		}
+		var out []string
+		seen := map[string]bool{}
+		for _, name := range names {
+			for _, ext := range exts {
+				key := name + ext
+				if fold {
+					key = strings.ToLower(key)
+				}
+				real, found := entries[key]
+				if !found {
+					continue
+				}
+				p := filepath.Join(dir, real)
+				if seen[p] || !isExecutable(p, o) {
+					continue
+				}
+				seen[p] = true
+				out = append(out, p)
+			}
+		}
+		return out
+	}
+
 	var out []string
 	seen := map[string]bool{}
 	for _, name := range names {
-		for _, ext := range ExeExts(env, o) {
+		for _, ext := range exts {
 			p := filepath.Join(dir, name+ext)
 			if seen[p] {
 				continue

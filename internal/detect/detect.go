@@ -53,6 +53,20 @@ type cacheEntry struct {
 type ProbeCache struct {
 	path string
 	m    map[string]cacheEntry
+	dirs *platform.DirCache
+}
+
+// Dirs returns the per-run directory-listing cache, creating it on first use.
+// Sharing it across every tool probed in one run is what keeps `doctor` from
+// re-listing the same directories once per tool.
+func (c *ProbeCache) Dirs() *platform.DirCache {
+	if c == nil {
+		return nil
+	}
+	if c.dirs == nil {
+		c.dirs = platform.NewDirCache()
+	}
+	return c.dirs
 }
 
 // NewProbeCache loads a cache from disk, ignoring any file it cannot parse.
@@ -115,6 +129,11 @@ func (c *ProbeCache) Save() error {
 // pinned path, tool-specific dirs, PATH, well-known install dirs, then extraDirs
 // from config. Duplicates (same real path) collapse.
 func CandidatePaths(t catalog.Tool, cfg config.Config, env map[string]string, osOverride string) []string {
+	return CandidatePathsWith(t, cfg, env, osOverride, nil)
+}
+
+// CandidatePathsWith is CandidatePaths sharing a directory-listing cache.
+func CandidatePathsWith(t catalog.Tool, cfg config.Config, env map[string]string, osOverride string, dc *platform.DirCache) []string {
 	var files, dirs []string
 	if p := cfg.Paths[t.ID]; p != "" {
 		if fi, err := os.Stat(p); err == nil && !fi.IsDir() {
@@ -144,7 +163,7 @@ func CandidatePaths(t catalog.Tool, cfg config.Config, env map[string]string, os
 		}
 	}
 	for _, d := range dirs {
-		for _, p := range platform.FindInDir(d, t.Names, env, osOverride) {
+		for _, p := range platform.FindInDirCached(d, t.Names, env, osOverride, dc) {
 			add(p)
 		}
 	}
@@ -212,7 +231,8 @@ func FindInstalls(t catalog.Tool, cfg config.Config, cache *ProbeCache, validate
 		return FindMSVC()
 	}
 	var out []Install
-	for _, p := range CandidatePaths(t, cfg, env, osOverride) {
+	dc := cache.Dirs()
+	for _, p := range CandidatePathsWith(t, cfg, env, osOverride, dc) {
 		inst := Probe(t, p, cache, 5*time.Second)
 		if cfg.Paths[t.ID] == p {
 			inst.Pinned = true
