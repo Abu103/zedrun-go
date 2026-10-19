@@ -56,6 +56,10 @@ Then wire it into Zed:
 zedrun-go install
 ```
 
+Not sure which route suits your machine? **[docs/SETUP.md](docs/SETUP.md)** has a
+step-by-step guide for Linux, macOS, Windows and WSL — including how to set it
+up with no Go and no network, and how to publish your own release.
+
 ---
 
 ## Sixty-second tour
