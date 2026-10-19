@@ -13,8 +13,8 @@ import (
 	"github.com/zedrun/zedrun-go/internal/catalog"
 	"github.com/zedrun/zedrun-go/internal/config"
 	"github.com/zedrun/zedrun-go/internal/detect"
-	"github.com/zedrun/zedrun-go/internal/platform"
 	"github.com/zedrun/zedrun-go/internal/planner"
+	"github.com/zedrun/zedrun-go/internal/platform"
 )
 
 // DefaultTools lists every tool id zedrun-go knows about, sorted.

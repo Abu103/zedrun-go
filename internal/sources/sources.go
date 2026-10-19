@@ -696,18 +696,18 @@ func num(v any) float64 {
 
 // upgradeHints turn an install origin into the command that upgrades it.
 var upgradeHints = map[string]string{
-	"homebrew":       "brew upgrade %s",
-	"snap":           "snap refresh %s",
-	"msys2":          "pacman -Syu %s (in the MSYS2 shell)",
-	"chocolatey":     "choco upgrade %s",
-	"scoop":          "scoop update %s",
-	"pyenv":          "pyenv install --list (then pyenv global <version>)",
-	"visual-studio":  "run the Visual Studio Installer to update the MSVC toolset",
-	"WindowsApps":    "winget upgrade %s",
-	"WSL":            "winget upgrade %s (on Windows)",
-	"rustup":         "rustup update",
-	"linuxbrew":      "brew upgrade %s",
-	"system":         "",
+	"homebrew":      "brew upgrade %s",
+	"snap":          "snap refresh %s",
+	"msys2":         "pacman -Syu %s (in the MSYS2 shell)",
+	"chocolatey":    "choco upgrade %s",
+	"scoop":         "scoop update %s",
+	"pyenv":         "pyenv install --list (then pyenv global <version>)",
+	"visual-studio": "run the Visual Studio Installer to update the MSVC toolset",
+	"WindowsApps":   "winget upgrade %s",
+	"WSL":           "winget upgrade %s (on Windows)",
+	"rustup":        "rustup update",
+	"linuxbrew":     "brew upgrade %s",
+	"system":        "",
 }
 
 // UpgradeHint says how to update an installed tool, based on where it came from.

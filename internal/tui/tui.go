@@ -18,8 +18,8 @@ import (
 	"github.com/zedrun/zedrun-go/internal/detect"
 	"github.com/zedrun/zedrun-go/internal/doctor"
 	"github.com/zedrun/zedrun-go/internal/installer"
-	"github.com/zedrun/zedrun-go/internal/platform"
 	"github.com/zedrun/zedrun-go/internal/planner"
+	"github.com/zedrun/zedrun-go/internal/platform"
 	"github.com/zedrun/zedrun-go/internal/sources"
 	"github.com/zedrun/zedrun-go/internal/versions"
 )

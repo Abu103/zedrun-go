@@ -16,8 +16,8 @@ import (
 	"time"
 
 	"github.com/zedrun/zedrun-go/internal/config"
-	"github.com/zedrun/zedrun-go/internal/platform"
 	"github.com/zedrun/zedrun-go/internal/planner"
+	"github.com/zedrun/zedrun-go/internal/platform"
 )
 
 // Execute runs every step in the plan and returns the exit code the caller
