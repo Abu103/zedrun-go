@@ -81,6 +81,15 @@ func MainWith(args []string, out, errOut io.Writer, opts Options) int {
 	if len(args) == 0 {
 		return cmdTUI(out, errOut, opts, env, osName)
 	}
+	// Answer `zedrun-go <cmd> --help` before the command's own flag parser can
+	// reject it. Answering the most obvious question with "unknown flag" is a
+	// dead end.
+	if len(args) > 1 && wantsHelp(args[1:]) {
+		if h, ok := commandHelp[args[0]]; ok {
+			fmt.Fprint(out, h)
+			return 0
+		}
+	}
 	switch args[0] {
 	case "--version":
 		fmt.Fprintf(out, "zedrun-go %s\n", version.Version)
@@ -636,6 +645,7 @@ func cmdPick(args []string, out, errOut io.Writer, opts Options, env map[string]
 	cache := cacheFor(opts, env, osName)
 	fmt.Fprintf(out, "%s — installed toolchains:\n", language)
 	seen := map[string]bool{}
+	ambiguous := false
 	for _, r := range lang.Runners {
 		for _, id := range r.Tool {
 			if seen[id] {
@@ -647,6 +657,9 @@ func cmdPick(args []string, out, errOut io.Writer, opts Options, env map[string]
 				fmt.Fprintf(out, "    %-10s not installed — %s\n", id, catalog.InstallHint(id, osName))
 				continue
 			}
+			if len(installs) > 1 {
+				ambiguous = true
+			}
 			for _, in := range installs {
 				state := "ok"
 				if !in.OK {
@@ -656,7 +669,14 @@ func cmdPick(args []string, out, errOut io.Writer, opts Options, env map[string]
 			}
 		}
 	}
-	fmt.Fprintf(out, "\nchoose one with: zedrun-go use %s <tool>\n", language)
+	// When two installs share a tool id, `use <lang> <tool>` cannot separate
+	// them: the preference is keyed by tool id, which is exactly what collides.
+	// Only the path distinguishes them, so the hint has to say so.
+	if ambiguous {
+		fmt.Fprintf(out, "\npin one with: zedrun-go use %s <tool> --path <path>\n", language)
+	} else {
+		fmt.Fprintf(out, "\nchoose one with: zedrun-go use %s <tool>\n", language)
+	}
 	_ = cache.Save()
 	return 0
 }

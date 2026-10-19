@@ -50,8 +50,97 @@ func TestGithubAtomOnlyPreReleases(t *testing.T) {
 	}
 	p := Product{ID: "proj", Kind: "github-atom", Params: map[string]string{"repo": "example/proj"}}
 	l := FetchLatest(p, fetcherFor(t, fx, time.Hour))
-	if l.Stable == "" {
-		t.Fatalf("Stable empty when only pre-releases exist: %+v", l)
+	if l.Stable != "" {
+		t.Errorf("Stable = %q, want empty: a beta is not a stable release", l.Stable)
+	}
+	if l.Pre != "v1.0.0-beta.2" {
+		t.Errorf("Pre = %q, want v1.0.0-beta.2", l.Pre)
+	}
+}
+
+// When the feed has no stable release, the API can still know one: its
+// /releases/latest endpoint answers exactly that question.
+func TestGithubAtomFallsBackToAPIWhenFeedHasNoStable(t *testing.T) {
+	fx := fixtures{
+		"https://github.com/example/proj/releases.atom": `<feed>
+  <entry><title>build-2.5.20-dev-1642</title></entry>
+  <entry><title>build-2.5.20-dev-1641</title></entry>
+</feed>`,
+		"https://api.github.com/repos/example/proj/releases": `[
+  {"tag_name":"build-2.5.20-dev-1642","prerelease":true},
+  {"tag_name":"build-2.5.20-dev-1641","prerelease":true}
+]`,
+		"https://api.github.com/repos/example/proj/releases/latest": `{"tag_name":"v2.4.21","prerelease":false}`,
+	}
+	p := Product{ID: "kotlin", Kind: "github-atom", Params: map[string]string{"repo": "example/proj"}}
+	l := FetchLatest(p, fetcherFor(t, fx, time.Hour))
+	if l.Stable != "v2.4.21" {
+		t.Errorf("Stable = %q, want v2.4.21 from /releases/latest", l.Stable)
+	}
+	if l.Pre != "build-2.5.20-dev-1642" {
+		t.Errorf("Pre = %q, want the newest dev build from the feed", l.Pre)
+	}
+}
+
+// A page of /releases can be entirely pre-releases even when stable releases
+// exist further down, so an empty stable must trigger the /releases/latest call.
+func TestGithubAPIAvoidsPromotingPreReleases(t *testing.T) {
+	fx := fixtures{
+		"https://api.github.com/repos/example/proj/releases": `[
+  {"tag_name":"v3.1.0-rc.2","prerelease":true},
+  {"tag_name":"v3.1.0-rc.1","prerelease":true}
+]`,
+		"https://api.github.com/repos/example/proj/releases/latest": `{"tag_name":"v3.0.0","prerelease":false}`,
+	}
+	p := Product{ID: "proj", Kind: "github-atom", Params: map[string]string{
+		"repo": "example/proj", "api": "https://api.github.com/repos/example/proj/releases",
+	}}
+	l := FetchLatest(p, fetcherFor(t, fx, time.Hour))
+	if l.Stable != "v3.0.0" {
+		t.Errorf("Stable = %q, want v3.0.0", l.Stable)
+	}
+	if l.Pre != "v3.1.0-rc.2" {
+		t.Errorf("Pre = %q, want v3.1.0-rc.2", l.Pre)
+	}
+}
+
+// With no stable release anywhere, say so rather than inventing one.
+func TestGithubAPIWithOnlyPreReleasesReportsNoStable(t *testing.T) {
+	fx := fixtures{
+		"https://api.github.com/repos/example/proj/releases": `[
+  {"tag_name":"v3.1.0-rc.2","prerelease":true}
+]`,
+	}
+	p := Product{ID: "proj", Kind: "github-atom", Params: map[string]string{
+		"repo": "example/proj", "api": "https://api.github.com/repos/example/proj/releases",
+	}}
+	l := FetchLatest(p, fetcherFor(t, fx, time.Hour))
+	if l.Stable != "" {
+		t.Errorf("Stable = %q, want empty", l.Stable)
+	}
+	if l.Pre != "v3.1.0-rc.2" {
+		t.Errorf("Pre = %q, want v3.1.0-rc.2", l.Pre)
+	}
+}
+
+// The python.org FTP index carries entries like "win32" beside real releases.
+func TestPythonFTPIgnoresNonVersionDirectories(t *testing.T) {
+	fx := fixtures{
+		"https://www.python.org/ftp/python/": `<html><body>
+  <a href="../">../</a>
+  <a href="win32/">win32/</a>
+  <a href="3.14.7/">3.14.7/</a>
+  <a href="3.14.6/">3.14.6/</a>
+  <a href="3.15.0a1/">3.15.0a1/</a>
+  <a href="2.7.18/">2.7.18/</a>
+</body></html>`,
+	}
+	l := FetchLatest(Products["python"], fetcherFor(t, fx, time.Hour))
+	if l.Stable != "3.14.7" {
+		t.Errorf("Stable = %q, want 3.14.7 (not win32)", l.Stable)
+	}
+	if l.Pre != "3.15.0a1" {
+		t.Errorf("Pre = %q, want 3.15.0a1", l.Pre)
 	}
 }
 

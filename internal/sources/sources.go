@@ -292,12 +292,23 @@ func githubAtom(p Product, f *Fetcher) versions.Latest {
 		return versions.Latest{Source: "error: no releases in the atom feed"}
 	}
 	if l.Stable == "" {
-		l.Stable = l.Pre
-		l.Pre = ""
+		// Every tag in the feed is a pre-release. Promoting the newest one to
+		// "stable" advertises a dev build as the newest release: JetBrains tags
+		// Kotlin as build-2.5.20-dev-NNNN, and that is exactly how a dev build
+		// got reported as the newest stable Kotlin. The API flags pre-releases
+		// explicitly, so ask it instead of guessing.
+		if api := githubAPI(p, f); api.Stable != "" {
+			if api.Pre == "" {
+				api.Pre = l.Pre
+			}
+			return api
+		}
 	}
 	return l
 }
 
+// githubAPI reads the release list from the REST API, which carries an explicit
+// prerelease flag that the atom feed lacks.
 func githubAPI(p Product, f *Fetcher) versions.Latest {
 	api := p.Params["api"]
 	if api == "" {
@@ -334,10 +345,39 @@ func githubAPI(p Product, f *Fetcher) versions.Latest {
 		return versions.Latest{Source: "error: no releases in the github payload"}
 	}
 	if l.Stable == "" {
-		l.Stable = l.Pre
-		l.Pre = ""
+		// The list is paginated, so it can be all pre-releases even when stable
+		// releases exist further down — the first page of JetBrains/kotlin is
+		// entirely dev builds. Never promote a pre-release to stable; ask the
+		// endpoint that answers the actual question.
+		l.Stable = githubLatestTag(p, f)
 	}
 	return l
+}
+
+// githubLatestTag asks for the single newest non-prerelease release. The
+// /releases list is paginated and a busy repo's first page can be entirely
+// pre-releases, so the list alone cannot answer "what is the newest stable".
+func githubLatestTag(p Product, f *Fetcher) string {
+	url := p.Params["latest"]
+	if url == "" {
+		url = "https://api.github.com/repos/" + p.Params["repo"] + "/releases/latest"
+	}
+	v, err := f.JSON(url)
+	if err != nil {
+		return ""
+	}
+	m, ok := v.(map[string]any)
+	if !ok {
+		return ""
+	}
+	if pre, _ := m["prerelease"].(bool); pre {
+		return ""
+	}
+	tag := str(m["tag_name"])
+	if tag == "" || isPreTag(tag) {
+		return ""
+	}
+	return tag
 }
 
 func goJSON(p Product, f *Fetcher) versions.Latest {
@@ -583,8 +623,10 @@ func pythonFTP(p Product, f *Fetcher) versions.Latest {
 		if name == "" || strings.Contains(name, "/") {
 			continue
 		}
-		v, ok := versions.ParseVersion(name)
-		if !ok || v.Raw != name {
+		// Strict: the index lists "win32" beside real releases, and the lenient
+		// parser reads the 32 out of it and calls it newer than 3.14.7.
+		v, ok := versions.ParseStrictVersion(name)
+		if !ok {
 			continue
 		}
 		if versions.IsPrerelease(v) {

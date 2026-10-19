@@ -471,6 +471,84 @@ func TestParseRunArgsFlagErrors(t *testing.T) {
 	}
 }
 
+// Every command must answer --help. `zedrun-go run --help` used to fail with
+// "unknown flag --help" and exit 2.
+func TestEveryCommandAnswersHelp(t *testing.T) {
+	for _, cmd := range commandNames {
+		code, out, errOut := run(t, testOpts(t), cmd, "--help")
+		if code != 0 {
+			t.Errorf("%s --help exit = %d, want 0 (stderr: %s)", cmd, code, errOut)
+		}
+		if !strings.Contains(out, "usage: zedrun-go "+cmd) {
+			t.Errorf("%s --help did not print its own usage:\n%s", cmd, out)
+		}
+		if strings.Contains(errOut, "unknown flag") {
+			t.Errorf("%s --help was still rejected as an unknown flag", cmd)
+		}
+	}
+}
+
+func TestWantsHelpStopsAtDoubleDash(t *testing.T) {
+	if !wantsHelp([]string{"-h"}) || !wantsHelp([]string{"--help"}) {
+		t.Fatal("wantsHelp should accept -h and --help")
+	}
+	if wantsHelp([]string{"--", "--help"}) {
+		t.Fatal("wantsHelp must stop at --, so the program still gets --help")
+	}
+	if wantsHelp([]string{"main.py", "input.txt"}) {
+		t.Fatal("wantsHelp should not fire on plain arguments")
+	}
+}
+
+// Two installs of one tool share a tool id, so `use <lang> <tool>` cannot tell
+// them apart — the hint has to offer --path instead.
+func TestPickHintMentionsPathWhenInstallsCollide(t *testing.T) {
+	opts := collidingPythonOpts(t)
+	code, out, errOut := run(t, opts, "pick", "python")
+	if code != 0 {
+		t.Fatalf("pick exit = %d, stderr: %s", code, errOut)
+	}
+	if !strings.Contains(out, "--path") {
+		t.Fatalf("two installs share a tool id, so the hint must mention --path:\n%s", out)
+	}
+}
+
+func TestDoctorSaysHowToPinBetweenCollidingInstalls(t *testing.T) {
+	opts := collidingPythonOpts(t)
+	code, out, errOut := run(t, opts, "doctor", "--all")
+	if code != 0 {
+		t.Fatalf("doctor exit = %d, stderr: %s", code, errOut)
+	}
+	if !strings.Contains(out, "usable installs") {
+		t.Skipf("no colliding installs were detected in this environment:\n%s", out)
+	}
+	if !strings.Contains(out, "--path") {
+		t.Fatalf("doctor must say how to choose between colliding installs:\n%s", out)
+	}
+}
+
+// collidingPythonOpts puts two executables named python3 on PATH, so the python
+// tool id has two usable installs.
+func collidingPythonOpts(t *testing.T) Options {
+	t.Helper()
+	home := t.TempDir()
+	var dirs []string
+	for _, n := range []string{"a", "b"} {
+		d := filepath.Join(home, n)
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		p := filepath.Join(d, "python3")
+		if err := os.WriteFile(p, []byte("#!/bin/sh\necho 'Python 3.12.0'\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		dirs = append(dirs, d)
+	}
+	opts := testOpts(t)
+	opts.Env["PATH"] = strings.Join(dirs, string(os.PathListSeparator))
+	return opts
+}
+
 func TestVersionFlag(t *testing.T) {
 	code, out, _ := run(t, testOpts(t), "--version")
 	if code != 0 || !strings.Contains(out, "zedrun-go") {

@@ -64,7 +64,11 @@ func Collect(cfg config.Config, cache *detect.ProbeCache, env map[string]string,
 			})
 		}
 		if usable > 1 {
-			problems = append(problems, fmt.Sprintf("%s: %d usable installs — run `zedrun-go use %s <tool>` to choose one", id, usable, id))
+			// Several installs of one tool share the same tool id, so
+			// `use <lang> <tool>` cannot tell them apart — it writes a
+			// preference by tool id, which is the thing that collides. The path
+			// is the only unambiguous handle, so point at that.
+			problems = append(problems, fmt.Sprintf("%s: %d usable installs — pin one with `zedrun-go use %s <tool> --path <path>`", id, usable, id))
 		}
 		if len(installs) > 0 && usable == 0 {
 			note := installs[0].Note

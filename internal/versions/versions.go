@@ -89,6 +89,19 @@ func ParseVersion(s string) (Version, bool) {
 	return Version{Nums: nums, PreRank: rank, PreNum: preNum, Raw: raw}, true
 }
 
+// ParseStrictVersion reads a version from a string that has to BE a version,
+// rather than merely contain one. Directory listings and release tags need it:
+// the python.org FTP index lists "win32" beside "3.14.7", and ParseVersion
+// cheerfully reads the 32 out of the former and then reports it as newer than
+// every real release.
+func ParseStrictVersion(s string) (Version, bool) {
+	raw := strings.TrimSpace(s)
+	if raw == "" || !isDigit(raw[0]) {
+		return Version{}, false
+	}
+	return ParseVersion(raw)
+}
+
 func classifyPre(rest string) (int, int) {
 	for _, pw := range preWords {
 		if k := indexToken(rest, pw.word); k >= 0 {
