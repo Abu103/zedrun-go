@@ -35,6 +35,7 @@ func Collect(cfg config.Config, cache *detect.ProbeCache, env map[string]string,
 	report := map[string]any{
 		"system": map[string]any{
 			"os":         platform.OSName(osOverride),
+			"wsl":        platform.WSLSummary(env, osOverride),
 			"go":         runtime.Version(),
 			"config_dir": platform.ConfigDir(env, osOverride),
 			"cache_dir":  platform.CacheDir(env, osOverride),
@@ -109,7 +110,12 @@ func defaultTool(language string, cfg config.Config, cache *detect.ProbeCache, e
 func Render(report map[string]any, out io.Writer, showAll bool) {
 	if sys, ok := report["system"].(map[string]any); ok {
 		fmt.Fprintln(out, "System")
-		for _, k := range []string{"os", "go", "config_dir", "cache_dir", "data_dir", "zed_dir"} {
+		keys := []string{"os"}
+		if s, _ := sys["wsl"].(string); s != "" {
+			keys = append(keys, "wsl")
+		}
+		keys = append(keys, "go", "config_dir", "cache_dir", "data_dir", "zed_dir")
+		for _, k := range keys {
 			fmt.Fprintf(out, "  %-11s %v\n", k, sys[k])
 		}
 	}

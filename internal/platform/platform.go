@@ -387,18 +387,164 @@ func ClassifyOrigin(path, osOverride string) string {
 }
 
 func isWSLPath(low string) bool {
-	if !strings.HasPrefix(low, "/mnt/") || len(low) < 7 {
+	return isWSLPathAt(low, WSLMountRoot())
+}
+
+// isWSLPathAt reports whether a lowercased, slash-separated path is a Windows
+// drive seen through a WSL automount at root, such as /mnt/c/Users/z/x.exe.
+// An empty root means Windows drives are not reachable at all.
+func isWSLPathAt(low, root string) bool {
+	if root == "" {
 		return false
 	}
-	return low[5] >= 'a' && low[5] <= 'z' && low[6] == '/'
+	prefix := root + "/"
+	if !strings.HasPrefix(low, prefix) || len(low) < len(prefix)+2 {
+		return false
+	}
+	rest := low[len(prefix):]
+	return rest[0] >= 'a' && rest[0] <= 'z' && rest[1] == '/'
 }
 
 // ToWSLPath converts a Windows path to its WSL mount equivalent, so a shell
 // script can be handed to a POSIX tool.
 func ToWSLPath(p string) string {
+	return ToWSLPathAt(p, WSLMountRoot())
+}
+
+// ToWSLPathAt is ToWSLPath against an explicit automount root. An empty root
+// means Windows drives are unreachable, so the path is only slash-normalised.
+func ToWSLPathAt(p, root string) string {
 	p = strings.ReplaceAll(p, `\`, "/")
-	if len(p) >= 2 && p[1] == ':' {
-		return "/mnt/" + strings.ToLower(string(p[0])) + p[2:]
+	if root == "" || len(p) < 2 || p[1] != ':' {
+		return p
 	}
-	return p
+	return root + "/" + strings.ToLower(string(p[0])) + p[2:]
+}
+
+// defaultWSLRoot is where WSL mounts Windows drives when wsl.conf says nothing.
+const defaultWSLRoot = "/mnt"
+
+// ParseWSLMountRoot extracts the automount root from the contents of
+// /etc/wsl.conf.
+//
+// WSL mounts Windows drives under /mnt by default, but a distro can move them
+// or turn them off:
+//
+//	[automount]
+//	root = /windir     # C: becomes /windir/c
+//	enabled = false    # no Windows drives at all
+//
+// An empty result means Windows drives are unreachable, which is not the same
+// as the default — callers must not fall back to /mnt when this is empty.
+func ParseWSLMountRoot(conf string) string {
+	root := defaultWSLRoot
+	enabled := true
+	section := ""
+	for _, line := range strings.Split(conf, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, ";") {
+			continue
+		}
+		if strings.HasPrefix(line, "[") {
+			if i := strings.Index(line, "]"); i > 0 {
+				section = strings.ToLower(strings.TrimSpace(line[1:i]))
+			}
+			continue
+		}
+		if section != "automount" {
+			continue
+		}
+		key, val, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		val = strings.Trim(strings.TrimSpace(val), `"'`)
+		switch strings.ToLower(strings.TrimSpace(key)) {
+		case "root":
+			if val != "" {
+				root = strings.TrimRight(val, "/")
+				if root == "" {
+					root = "/"
+				}
+			}
+		case "enabled":
+			enabled = !strings.EqualFold(val, "false")
+		}
+	}
+	if !enabled {
+		return ""
+	}
+	return root
+}
+
+var (
+	wslRootOnce sync.Once
+	wslRoot     string
+)
+
+// WSLMountRoot returns the directory WSL mounts Windows drives under, or "" when
+// they are not reachable. It reads /etc/wsl.conf once — the file only changes
+// when the distro is restarted, which restarts this process too.
+func WSLMountRoot() string {
+	wslRootOnce.Do(func() {
+		conf, err := os.ReadFile("/etc/wsl.conf")
+		if err != nil {
+			wslRoot = defaultWSLRoot
+			return
+		}
+		wslRoot = ParseWSLMountRoot(string(conf))
+	})
+	return wslRoot
+}
+
+// KernelIsWSL reports whether a /proc/version string came from a WSL kernel.
+// Microsoft builds every WSL kernel, and the vendor shows up in the string.
+func KernelIsWSL(procVersion string) bool {
+	return strings.Contains(strings.ToLower(procVersion), "microsoft")
+}
+
+// wslEnvMarker reports whether the environment carries a marker WSL itself set.
+func wslEnvMarker(env map[string]string, osOverride string) bool {
+	if OSName(osOverride) != "linux" {
+		return false
+	}
+	return Env(env, osOverride, "WSL_DISTRO_NAME") != "" ||
+		Env(env, osOverride, "WSL_INTEROP") != ""
+}
+
+// IsWSL reports whether this process is running inside a WSL distro.
+//
+// The environment is checked first because it is free: WSL exports
+// WSL_DISTRO_NAME and WSL_INTEROP into every process it starts. Neither is
+// present for a process started by systemd inside the distro, so the kernel
+// string is the fallback.
+func IsWSL(env map[string]string, osOverride string) bool {
+	if wslEnvMarker(env, osOverride) {
+		return true
+	}
+	if OSName(osOverride) != "linux" {
+		return false
+	}
+	procVersion, err := os.ReadFile("/proc/version")
+	if err != nil {
+		return false
+	}
+	return KernelIsWSL(string(procVersion))
+}
+
+// WSLSummary describes the WSL environment for display, or "" when this is not
+// a WSL distro. The mount root is included because a distro that moved or
+// disabled it is the case where Windows paths stop resolving.
+func WSLSummary(env map[string]string, osOverride string) string {
+	if !IsWSL(env, osOverride) {
+		return ""
+	}
+	root := WSLMountRoot()
+	if root == "" {
+		return "yes (Windows drives not mounted)"
+	}
+	if distro := Env(env, osOverride, "WSL_DISTRO_NAME"); distro != "" {
+		return "yes (" + distro + ", drives at " + root + ")"
+	}
+	return "yes (drives at " + root + ")"
 }

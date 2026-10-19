@@ -168,3 +168,40 @@ func TestDefaultToolsCoversCatalog(t *testing.T) {
 		}
 	}
 }
+
+// doctor is the first thing a user runs on a new machine, and on WSL the thing
+// that breaks is Windows paths not resolving. The wsl line names the distro and
+// the mount root so that failure is visible instead of mysterious.
+func TestRenderShowsWSLOnlyWhenPresent(t *testing.T) {
+	sys := map[string]any{
+		"os": "linux", "go": "go1.27.2", "config_dir": "/home/z/.config/zedrun",
+		"cache_dir": "/home/z/.cache/zedrun", "data_dir": "/home/z/.local/share/zedrun",
+		"zed_dir": "/home/z/.config/zed",
+	}
+	report := map[string]any{"system": sys}
+
+	sys["wsl"] = ""
+	var buf bytes.Buffer
+	Render(report, &buf, false)
+	if strings.Contains(buf.String(), "wsl") {
+		t.Errorf("a wsl line was rendered on a non-WSL host:\n%s", buf.String())
+	}
+	if !strings.Contains(buf.String(), "os") {
+		t.Errorf("the system block vanished:\n%s", buf.String())
+	}
+
+	sys["wsl"] = "yes (Ubuntu-24.04, drives at /mnt)"
+	buf.Reset()
+	Render(report, &buf, false)
+	got := buf.String()
+	if !strings.Contains(got, "wsl") {
+		t.Errorf("wsl line missing on a WSL host:\n%s", got)
+	}
+	if !strings.Contains(got, "drives at /mnt") {
+		t.Errorf("wsl line does not name the mount root:\n%s", got)
+	}
+	// It belongs next to os, not buried at the end.
+	if strings.Index(got, "wsl") > strings.Index(got, "go ") {
+		t.Errorf("wsl should follow os in the system block:\n%s", got)
+	}
+}
