@@ -383,6 +383,14 @@ machine.
 
 ## Troubleshooting
 
+**Windows Defender deletes the binary.** It flags freshly built, unsigned Go
+executables as `Trojan:Win32/Bearfoos.A!ml` — a false positive from its ML
+heuristic. The released binaries carry Windows version info and an application
+manifest specifically to avoid this, so download a release rather than copying a
+`go build` output around. If you build from source and Defender eats it, the
+`.syso` files in `cmd/zedrun/` are what stop it; regenerate them with
+`make resources`.
+
 **`no toolchain found for x` (exit 127).** Nothing on your machine can run that
 language. `zedrun-go pick <language>` lists what it looked for and prints an
 install hint for your OS. If you have a toolchain somewhere unusual, add the
