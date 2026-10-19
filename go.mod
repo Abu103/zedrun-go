@@ -1,6 +1,6 @@
 module github.com/zedrun/zedrun-go
 
-go 1.27.2
+go 1.24.0
 
 require (
 	github.com/charmbracelet/bubbletea v1.3.10
