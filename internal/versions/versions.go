@@ -102,6 +102,46 @@ func ParseStrictVersion(s string) (Version, bool) {
 	return ParseVersion(raw)
 }
 
+// ExtractVersion returns just the version token inside s.
+//
+// A version source routinely hands back more than a version. Rust's channel
+// manifest embeds the commit and the date in its version field
+// ("1.99.1 (58cf8f9c3 2026-10-13)"), a GitHub release title carries prose
+// ("v7.6.7 Release of PowerShell"), and others prefix the number ("go1.27.2",
+// "LLVM 23.1.3"). Printed verbatim that misaligns the table and misreports what
+// the newest version actually is. It returns "" when there is no version at all.
+func ExtractVersion(s string) string {
+	raw := strings.TrimSpace(s)
+	i := 0
+	for i < len(raw) && !isDigit(raw[i]) {
+		i++
+	}
+	if i >= len(raw) {
+		return ""
+	}
+	start := i
+	for i < len(raw) && (isDigit(raw[i]) || raw[i] == '.') {
+		i++
+	}
+	end := i
+	// Keep a pre-release suffix, attached or separated: 3.15.0a1, 1.24rc1,
+	// 1.99.0-rc.1, 2.5.20-dev-1642. Dropping an attached one is not cosmetic —
+	// it makes an alpha indistinguishable from a final release.
+	if i < len(raw) && (isLetter(raw[i]) || raw[i] == '-' || raw[i] == '+') {
+		j := i
+		if raw[j] == '-' || raw[j] == '+' {
+			j++
+		}
+		for j < len(raw) && (isDigit(raw[j]) || isLetter(raw[j]) || raw[j] == '.' || raw[j] == '-') {
+			j++
+		}
+		if j > i {
+			end = j
+		}
+	}
+	return strings.TrimRight(raw[start:end], ".")
+}
+
 func classifyPre(rest string) (int, int) {
 	for _, pw := range preWords {
 		if k := indexToken(rest, pw.word); k >= 0 {
@@ -193,6 +233,12 @@ func Judge(installed string, l Latest, channel string) (state, target, bump stri
 	if strings.HasPrefix(l.Source, "error") {
 		return "unknown", "", ""
 	}
+	// Reduce the provider's text to bare versions first. Rust ships the commit
+	// and date inside its version field, PowerShell titles releases with prose,
+	// Go prefixes "go". Left alone that misaligns the outdated table and
+	// misreports what the newest version is.
+	l.Stable = ExtractVersion(l.Stable)
+	l.Pre = ExtractVersion(l.Pre)
 	target = l.Stable
 	if channel == "pre" && l.Pre != "" {
 		pv, pok := ParseVersion(l.Pre)

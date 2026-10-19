@@ -157,7 +157,7 @@ func CandidatePathsWith(t catalog.Tool, cfg config.Config, env map[string]string
 			dirs = append(dirs, p)
 		}
 	}
-	dirs = append(dirs, toolDirs(t, env)...)
+	dirs = append(dirs, toolDirs(t, env, osOverride)...)
 	dirs = append(dirs, platform.PathEntries(env, osOverride)...)
 	dirs = append(dirs, platform.ExtraSearchDirs(env, osOverride)...)
 	dirs = append(dirs, cfg.ExtraDirs...)
@@ -185,10 +185,10 @@ func CandidatePathsWith(t catalog.Tool, cfg config.Config, env map[string]string
 	return out
 }
 
-func toolDirs(t catalog.Tool, env map[string]string) []string {
-	h := env["HOME"]
+func toolDirs(t catalog.Tool, env map[string]string, osOverride string) []string {
+	h := platform.Env(env, osOverride, "HOME")
 	if h == "" {
-		h = env["USERPROFILE"]
+		h = platform.Env(env, osOverride, "USERPROFILE")
 	}
 	var out []string
 	for _, d := range t.Dirs {

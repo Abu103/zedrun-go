@@ -38,21 +38,45 @@ func join(osName string, parts ...string) string {
 	return strings.Join(parts, "/")
 }
 
-func home(env map[string]string, osName string) string {
-	if osName == "windows" {
-		if v := env["USERPROFILE"]; v != "" {
+// Env reads an environment variable the way the platform does.
+//
+// Unix environment variables are case-sensitive — PATH and path are different
+// variables — so the lookup there stays exact. Windows lookups are case
+// insensitive, and the environment block keeps whatever casing the parent
+// process used, so one machine hands us `Path`, another `PATH`, another `path`.
+// An exact-case map lookup therefore finds nothing, which is how the whole PATH
+// came to be skipped on Windows: python, go and node live only on it, so they
+// were invisible.
+func Env(env map[string]string, osOverride, name string) string {
+	if v := env[name]; v != "" {
+		return v
+	}
+	if OSName(osOverride) != "windows" {
+		return ""
+	}
+	for k, v := range env {
+		if v != "" && strings.EqualFold(k, name) {
 			return v
 		}
-		if d, p := env["HOMEDRIVE"], env["HOMEPATH"]; d != "" || p != "" {
+	}
+	return ""
+}
+
+func home(env map[string]string, osName string) string {
+	if osName == "windows" {
+		if v := Env(env, osName, "USERPROFILE"); v != "" {
+			return v
+		}
+		if d, p := Env(env, osName, "HOMEDRIVE"), Env(env, osName, "HOMEPATH"); d != "" || p != "" {
 			return d + p
 		}
 	}
-	return env["HOME"]
+	return Env(env, osName, "HOME")
 }
 
 func appData(env map[string]string, osName string) string {
 	if osName == "windows" {
-		if v := env["APPDATA"]; v != "" {
+		if v := Env(env, osName, "APPDATA"); v != "" {
 			return v
 		}
 	}
@@ -61,7 +85,7 @@ func appData(env map[string]string, osName string) string {
 
 func localAppData(env map[string]string, osName string) string {
 	if osName == "windows" {
-		if v := env["LOCALAPPDATA"]; v != "" {
+		if v := Env(env, osName, "LOCALAPPDATA"); v != "" {
 			return v
 		}
 	}
@@ -136,7 +160,7 @@ func PathEntries(env map[string]string, osOverride string) []string {
 		sep = ";"
 	}
 	var out []string
-	for _, p := range strings.Split(env["PATH"], sep) {
+	for _, p := range strings.Split(Env(env, osOverride, "PATH"), sep) {
 		p = strings.Trim(strings.TrimSpace(p), `"`)
 		if p != "" {
 			out = append(out, p)
@@ -150,7 +174,7 @@ func ExeExts(env map[string]string, osOverride string) []string {
 	if OSName(osOverride) != "windows" {
 		return []string{""}
 	}
-	raw := env["PATHEXT"]
+	raw := Env(env, osOverride, "PATHEXT")
 	if raw == "" {
 		raw = ".COM;.EXE;.BAT;.CMD"
 	}

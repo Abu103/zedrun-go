@@ -1,0 +1,26 @@
+{
+  "FixedFileInfo": {
+    "FileVersion": { "Major": 0, "Minor": 1, "Patch": 0, "Build": 0 },
+    "ProductVersion": { "Major": 0, "Minor": 1, "Patch": 0, "Build": 0 },
+    "FileFlagsMask": "3f",
+    "FileFlags": "00",
+    "FileOS": "040004",
+    "FileType": "01",
+    "FileSubType": "00"
+  },
+  "StringFileInfo": {
+    "Comments": "Code Runner for Zed: runs a file with the toolchain you actually have.",
+    "CompanyName": "zedrun-go contributors",
+    "FileDescription": "zedrun-go - Code Runner for Zed",
+    "FileVersion": "0.1.0.0",
+    "InternalName": "zedrun-go",
+    "LegalCopyright": "MIT licensed",
+    "OriginalFilename": "zedrun-go.exe",
+    "ProductName": "zedrun-go",
+    "ProductVersion": "0.1.0"
+  },
+  "VarFileInfo": {
+    "Translation": { "LangID": "0409", "CharsetID": "04B0" }
+  },
+  "ManifestPath": "zedrun.manifest"
+}

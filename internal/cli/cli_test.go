@@ -262,12 +262,15 @@ func TestOutdatedPreFlag(t *testing.T) {
 		return nil, os.ErrNotExist
 	})
 
+	// Targets are reported as bare versions now, so both halves have to use
+	// that form — matching on the old "v" prefix would make the negative check
+	// below pass no matter what the stable channel reported.
 	_, stableOut, _ := run(t, opts, "outdated", "--json")
-	if strings.Contains(stableOut, "v24.0.0-rc.1") {
+	if strings.Contains(stableOut, "24.0.0-rc.1") {
 		t.Errorf("stable channel reported a pre-release target:\n%s", stableOut)
 	}
 	_, preOut, _ := run(t, opts, "outdated", "--json", "--pre")
-	if !strings.Contains(preOut, "v24.0.0-rc.1") {
+	if !strings.Contains(preOut, "24.0.0-rc.1") {
 		t.Errorf("--pre did not surface the pre-release target:\n%s", preOut)
 	}
 }
