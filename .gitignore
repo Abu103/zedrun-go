@@ -1,0 +1,14 @@
+# build output
+/zedrun
+/zedrun.exe
+/dist/
+*.test
+*.out
+
+# editor / OS
+.DS_Store
+.idea/
+.vscode/
+
+# superpowers scratch workspace
+.superpowers/
