@@ -134,12 +134,20 @@ Then open the dashboard — `zedrun-go` with no arguments:
 | key | action |
 |-----|--------|
 | `↑` `↓` / `k` `j` | move between languages |
-| `r` | run a file |
+| `PgUp` `PgDn` / `Ctrl+U` `Ctrl+D` | scroll the view (or use the wheel) |
+| `Home` `End` / `g` `G` | jump to the top / bottom |
 | `d` | doctor |
-| `u` | check for updates (`p` toggles pre-release) |
 | `t` | pick a toolchain for the highlighted language |
-| `i` | install the Zed tasks |
+| `i` | preview the Zed install; press `i` again to apply |
+| `c` | clear the output pane |
+| `p` | toggle pre-release for the update check |
 | `q` / `Esc` / `Ctrl+C` | quit |
+
+The view is windowed to your terminal and the footer always stays on the last
+row, so the key hints never scroll away.
+
+`r` (run) and `u` (check updates) are in the dashboard but not yet wired up —
+use `zedrun-go run FILE` and `zedrun-go outdated` from the CLI for now.
 
 Piped or non-interactive output falls back to plain text, so the same binary
 works in scripts and CI.

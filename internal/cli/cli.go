@@ -798,6 +798,7 @@ func cmdTUI(out, errOut io.Writer, opts Options, env map[string]string, osName s
 	code, err := tui.Run(cfg, tui.Options{
 		Env: env, OS: osName, Cache: cache, Fetcher: opts.Fetcher, File: opts.File,
 	})
+	_ = cache.Save()
 	if err != nil {
 		fmt.Fprintln(errOut, err)
 		return 1

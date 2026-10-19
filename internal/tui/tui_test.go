@@ -142,8 +142,9 @@ func TestActionOutputAccumulates(t *testing.T) {
 	if len(mm2.Output) <= len(mm.Output) {
 		t.Fatal("output did not accumulate across actions")
 	}
-	if !strings.Contains(mm2.View(), mm2.Output[len(mm2.Output)-1]) {
-		t.Fatal("the newest output line is not shown in the view")
+	if !strings.Contains(mm2.View(), mm2.fit(mm2.Output[len(mm2.Output)-1])) {
+		t.Fatalf("the newest output line is not shown in the view (want %q)",
+			mm2.fit(mm2.Output[len(mm2.Output)-1]))
 	}
 }
 
