@@ -135,13 +135,15 @@ func AppendManagedBlock(text, block, begin, end string) string {
 		return "[" + nl + region + nl + "]" + nl
 	}
 	// The comma belongs immediately after the last real element, never after a
-	// trailing comment, so find it in the comment-blanked text.
+	// trailing comment, so find it in the comment-blanked text. If the element
+	// already ends in a comma — which is valid JSONC, and common — adding
+	// another produces ",," and the file no longer parses at all.
 	k := close - 1
 	for k >= 0 && isSpaceByte(blank[k]) {
 		k--
 	}
 	sep := ""
-	if k >= 0 && blank[k] != '[' {
+	if k >= 0 && blank[k] != '[' && blank[k] != ',' {
 		sep = ","
 	}
 	gap := text[k+1 : close]
