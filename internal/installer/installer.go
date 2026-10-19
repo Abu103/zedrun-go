@@ -184,9 +184,17 @@ func Uninstall(zedDir string, purge bool) ([]string, error) {
 	return msgs, nil
 }
 
-// tidyArray collapses an emptied array back to "[]".
+// tidyArray collapses an emptied array back to "[]", whatever whitespace the
+// removal left between the brackets.
 func tidyArray(text string) string {
-	if strings.TrimSpace(jsonc.BlankComments(text)) == "[]" {
+	stripped := strings.Map(func(r rune) rune {
+		switch r {
+		case ' ', '	', '\n', '\r':
+			return -1
+		}
+		return r
+	}, jsonc.BlankComments(text))
+	if stripped == "[]" || stripped == "" {
 		return "[]\n"
 	}
 	return text
