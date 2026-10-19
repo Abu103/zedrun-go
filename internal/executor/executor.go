@@ -23,7 +23,7 @@ import (
 // Execute runs every step in the plan and returns the exit code the caller
 // should exit with: the failing step's code, or the last step's code.
 func Execute(p planner.Plan, cfg config.Config, out io.Writer, timeout time.Duration, echo, verbose bool) int {
-	if err := writeScripts(p); err != nil {
+	if err := prepare(p); err != nil {
 		fmt.Fprintf(out, "zedrun-go: %v\n", err)
 		return 1
 	}
@@ -66,11 +66,31 @@ func printFooter(out io.Writer, code int, elapsed float64, osName string) {
 	fmt.Fprintln(out, msg)
 }
 
-func writeScripts(p planner.Plan) error {
-	for path, content := range p.Scripts {
-		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+// prepare creates every directory the plan will write into — the build dir for
+// artifacts, and the dirs for wrapper scripts — then writes the scripts.
+func prepare(p planner.Plan) error {
+	dirs := map[string]bool{}
+	for path := range p.Scripts {
+		dirs[filepath.Dir(path)] = true
+	}
+	for _, w := range p.Writes {
+		dirs[filepath.Dir(w)] = true
+	}
+	for _, st := range p.Steps {
+		if st.Cwd != "" {
+			dirs[st.Cwd] = true
+		}
+	}
+	for d := range dirs {
+		if err := os.MkdirAll(d, 0o755); err != nil {
 			return err
 		}
+	}
+	return writeScripts(p)
+}
+
+func writeScripts(p planner.Plan) error {
+	for path, content := range p.Scripts {
 		if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
 			return err
 		}

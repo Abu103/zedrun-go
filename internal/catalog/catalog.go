@@ -306,6 +306,11 @@ func BuildCustom(key string, spec map[string]any) Language {
 			steps = append(steps, argv)
 		}
 	}
+	// Without an explicit tool, the command's own program is the tool, so error
+	// messages and install hints name what the user actually asked for.
+	if len(steps) > 0 && toolID == "custom" {
+		toolID = filepath.Base(steps[0][0])
+	}
 	if len(steps) > 0 {
 		l.Runners = append(l.Runners, Runner{Tool: []string{toolID}, Steps: steps})
 	}
