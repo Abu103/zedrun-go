@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, impl]
   pull_request:
 
 jobs:
@@ -11,7 +11,9 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-        go: ["1.22", "1.23", "1.24"]
+        # "1.24" is the floor declared in go.mod — keep the two in sync.
+        # "stable" catches breakage from a new Go release early.
+        go: ["1.24", "stable"]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -20,4 +22,16 @@ jobs:
           go-version: ${{ matrix.go }}
       - run: go build ./...
       - run: go vet ./...
+      - run: go test ./...
+
+  # The module declares a minimum Go version; a build on that exact version is
+  # what proves the floor is honest rather than aspirational.
+  floor:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go build ./...
       - run: go test ./...
