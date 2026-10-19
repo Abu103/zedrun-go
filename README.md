@@ -381,6 +381,38 @@ machine.
 
 ---
 
+## Running under WSL
+
+The Linux binaries are statically linked, so they run on every WSL distro —
+glibc ones like Ubuntu and Debian and musl ones like Alpine. Verified by running
+the released `linux/amd64` binary inside an Alpine rootfs with no bash present:
+`doctor` reports the toolchains and `run script.sh` falls back to `/bin/sh`.
+
+Two things about WSL are handled explicitly:
+
+**Windows drives on `PATH`.** WSL puts the Windows `PATH` into the Linux
+environment, so `python.exe`, `node.exe` and friends appear alongside the real
+toolchains. Paths under the automount root are classified as `WSL` origin and
+sort last, so a Windows shim never shadows a working Linux install.
+
+**A moved automount root.** `/etc/wsl.conf` can move or disable the mount:
+
+```ini
+[automount]
+root = /windir     # C: is now /windir/c, not /mnt/c
+enabled = false    # no Windows drives at all
+```
+
+`zedrun-go` reads that file and uses the configured root, rather than assuming
+`/mnt`. `zedrun-go doctor` prints what it found:
+
+```
+  os          linux
+  wsl         yes (Ubuntu-24.04, drives at /mnt)
+```
+
+---
+
 ## Troubleshooting
 
 **Windows Defender deletes the binary.** It flags freshly built, unsigned Go
