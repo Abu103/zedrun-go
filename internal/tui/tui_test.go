@@ -133,7 +133,9 @@ func TestKeyFooterListsKeys(t *testing.T) {
 }
 
 func TestActionOutputAccumulates(t *testing.T) {
-	m := NewModel(rows(), config.Default(), Options{})
+	// isolatedOpts: this is about accumulation and visibility, not about the
+	// host's toolchains. Probing the real filesystem made it take 14s.
+	m := NewModel(rows(), config.Default(), isolatedOpts(t))
 	mm, _ := send(t, m, "u")
 	if len(mm.Output) == 0 {
 		t.Fatal("an action produced no output")
@@ -142,9 +144,16 @@ func TestActionOutputAccumulates(t *testing.T) {
 	if len(mm2.Output) <= len(mm.Output) {
 		t.Fatal("output did not accumulate across actions")
 	}
-	if !strings.Contains(mm2.View(), mm2.fit(mm2.Output[len(mm2.Output)-1])) {
-		t.Fatalf("the newest output line is not shown in the view (want %q)",
-			mm2.fit(mm2.Output[len(mm2.Output)-1]))
+	// Output wraps instead of truncating now, so the newest line can be split
+	// across rows. Check its last chunk, which is the part truncation used to
+	// eat — asserting on the whole truncated line no longer means anything.
+	chunks := mm2.wrap(mm2.Output[len(mm2.Output)-1])
+	want := strings.TrimSpace(chunks[len(chunks)-1])
+	if want == "" && len(chunks) > 1 {
+		want = strings.TrimSpace(chunks[len(chunks)-2])
+	}
+	if !strings.Contains(mm2.View(), want) {
+		t.Fatalf("the newest output line is not shown in the view (want %q)", want)
 	}
 }
 

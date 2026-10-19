@@ -52,10 +52,19 @@ type Model struct {
 
 	Scroll int // first visible body line
 
+	// Mouse is mouse capture. It is off by default because capture stops the
+	// terminal from selecting text, and the point of this dashboard is reading
+	// output you may want to copy. `m` toggles it.
+	Mouse bool
+
 	confirmInstall bool // set after an `i` preview; a second `i` applies
+	updatesRunning bool // set while an update check is in flight
 
 	// picker is non-nil while the tool picker overlay is open.
 	picker *picker
+
+	// prompt is non-nil while the `r` path prompt is open.
+	prompt *pathPrompt
 
 	cfg  config.Config
 	opts Options
@@ -80,6 +89,40 @@ type choice struct {
 	OK                  bool
 }
 
+// pathPrompt is a minimal line editor for the `r` file path: runes, backspace,
+// enter and esc. Hand-rolled on purpose — a one-field prompt is not worth a
+// dependency, and the dashboard is otherwise free of them.
+type pathPrompt struct {
+	label string
+	value []rune
+}
+
+// handle applies one key and reports whether the prompt was submitted or
+// cancelled. Anything else is editing.
+func (p *pathPrompt) handle(msg tea.KeyMsg) (submit, cancel bool) {
+	switch msg.String() {
+	case "enter":
+		return true, false
+	case "esc":
+		return false, true
+	case "backspace", "ctrl+h":
+		if n := len(p.value); n > 0 {
+			p.value = p.value[:n-1]
+		}
+	case "ctrl+u":
+		p.value = nil
+	default:
+		// Runes only: while the prompt is open, `q` is a character, not a quit.
+		if msg.Type == tea.KeyRunes {
+			p.value = append(p.value, msg.Runes...)
+		}
+	}
+	return false, false
+}
+
+// text is what has been typed so far.
+func (p *pathPrompt) text() string { return string(p.value) }
+
 // NewModel builds the dashboard model.
 func NewModel(rows []LangRow, cfg config.Config, opts Options) Model {
 	return Model{Rows: rows, cfg: cfg, opts: opts, w: 80, h: 24}
@@ -94,6 +137,12 @@ type rowsMsg []LangRow
 
 // runDoneMsg reports a finished `r` run.
 type runDoneMsg struct{ err error }
+
+// updatesMsg carries a finished update check into the model.
+type updatesMsg struct{ lines []string }
+
+// doctorMsg carries a finished diagnostics run into the model.
+type doctorMsg struct{ text string }
 
 // Init kicks off the toolchain scan in the background, so the dashboard draws
 // immediately instead of blocking for seconds while every language is resolved.
@@ -128,8 +177,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.Scroll = m.bodyLen()
 		m.clamp()
 		return m, nil
+	case updatesMsg:
+		m.updatesRunning = false
+		m.appendLines(msg.lines)
+		m.Scroll = m.bodyLen()
+		m.clamp()
+		return m, nil
+	case doctorMsg:
+		m.append(msg.text)
+		m.Scroll = m.bodyLen()
+		m.clamp()
+		return m, nil
 	case tea.MouseMsg:
-		if m.picker != nil {
+		if m.picker != nil || m.prompt != nil {
 			return m, nil
 		}
 		switch msg.Button {
@@ -141,6 +201,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.clamp()
 		return m, nil
 	case tea.KeyMsg:
+		// Overlays get every key while they are open.
+		if m.prompt != nil {
+			return m.updatePrompt(msg)
+		}
 		if m.picker != nil {
 			return m.updatePicker(msg)
 		}
@@ -174,28 +238,61 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.Scroll = m.bodyLen()
 		case "c":
 			m.Output = nil
+		case "m":
+			m.Mouse = !m.Mouse
+			if m.Mouse {
+				m.append("mouse: on — the wheel scrolls, but the terminal no longer selects text")
+			} else {
+				m.append("mouse: off — the terminal selects text again")
+			}
+			m.Scroll = m.bodyLen()
+			m.clamp()
+			// Capture is a terminal mode, so the program has to be told.
+			if m.Mouse {
+				return m, tea.EnableMouseCellMotion
+			}
+			return m, tea.DisableMouse
 		case "p":
 			m.Pre = !m.Pre
 			m.append("channel: " + m.channelLabel())
 		case "r":
 			m.LastAction = "run"
-			if m.opts.File != "" {
-				bin, err := os.Executable()
-				if err != nil {
-					bin = "zedrun-go"
-				}
-				// ExecProcess hands the terminal to the child and restores the TUI after.
-				return m, tea.ExecProcess(exec.Command(bin, "run", m.opts.File),
-					func(err error) tea.Msg { return runDoneMsg{err} })
+			file, ok := m.runFile()
+			if !ok {
+				// Nothing knows which file to run, so ask rather than print a
+				// dead end — this is what made `r` look broken.
+				m.prompt = &pathPrompt{label: "run which file?"}
+				m.clamp()
+				return m, nil
 			}
-			m.act("run")
+			m.append("run: " + file)
 			m.Scroll = m.bodyLen()
+			m.clamp()
+			return m, m.execRun(file)
 		case "d":
-			m.act("doctor")
+			m.LastAction = "doctor"
+			m.append("running doctor…")
 			m.Scroll = m.bodyLen()
+			m.clamp()
+			// Doctor is slow on a cold cache — 886ms here, nearly all of it
+			// listing /mnt PATH entries — so it does not run inside Update.
+			return m, func() tea.Msg { return doctorMsg{m.doctorText()} }
 		case "u":
-			m.act("updates")
+			m.LastAction = "updates"
+			if m.updatesRunning {
+				m.append("updates: already checking")
+				m.Scroll = m.bodyLen()
+				m.clamp()
+				return m, nil
+			}
+			m.updatesRunning = true
+			m.append("checking for updates…")
 			m.Scroll = m.bodyLen()
+			m.clamp()
+			// Every product's version source is a network round trip. Running
+			// that inside Update freezes the dashboard until the slowest one
+			// answers, so it goes out as a command and reports back.
+			return m, func() tea.Msg { return updatesMsg{m.updateLines()} }
 		case "t":
 			m.act("pick")
 			m.Scroll = m.bodyLen()
@@ -244,22 +341,16 @@ func (m Model) body() []string {
 	if len(m.Output) > 0 {
 		lines = append(lines, "")
 		for _, l := range m.Output {
-			lines = append(lines, m.fit(l))
+			lines = append(lines, m.wrap(l)...)
 		}
 	}
 	return lines
 }
 
-func (m Model) bodyLen() int {
-	n := len(m.Rows)
-	if m.Rows == nil {
-		n = 1
-	}
-	if len(m.Output) > 0 {
-		n += 1 + len(m.Output)
-	}
-	return n
-}
+// bodyLen is the length of the rendered body. It deliberately renders rather
+// than re-deriving the count: wrapping depends on the terminal width, and two
+// copies of that arithmetic drift apart, which silently breaks the scroll clamp.
+func (m Model) bodyLen() int { return len(m.body()) }
 
 // clamp keeps Scroll inside [0, bodyLen-window].
 func (m *Model) clamp() {
@@ -284,7 +375,8 @@ func (m *Model) followCursor() {
 	}
 }
 
-// fit truncates a line to the terminal width so it never wraps.
+// fit truncates a line to the terminal width so it never wraps. Used for the
+// table and the chrome, where a fixed layout matters more than the tail.
 func (m Model) fit(s string) string {
 	if m.w <= 0 {
 		return s
@@ -292,9 +384,22 @@ func (m Model) fit(s string) string {
 	return ansi.Truncate(s, m.w, "…")
 }
 
+// wrap breaks an output line to the terminal width. Output wraps rather than
+// truncates because the actionable end of a long line — a flag, a path — is at
+// the right, and cutting it off is what made doctor's advice unusable.
+func (m Model) wrap(s string) []string {
+	if m.w <= 0 {
+		return []string{s}
+	}
+	return strings.Split(ansi.Wrap(s, m.w, ""), "\n")
+}
+
 // View renders the dashboard, windowed to the terminal: header, a slice of the
 // body, and a footer that is always on the last row.
 func (m Model) View() string {
+	if m.prompt != nil {
+		return m.promptView()
+	}
 	if m.picker != nil {
 		return m.pickerView()
 	}
@@ -316,7 +421,7 @@ func (m Model) View() string {
 	var b strings.Builder
 	b.WriteString(m.fit(title.Render("zedrun-go — Code Runner for Zed")))
 	b.WriteString("\n")
-	sub := fmt.Sprintf("%s · %d languages · %s channel", m.osName(), len(m.Rows), m.channelLabel())
+	sub := fmt.Sprintf("%s · %d languages · %s channel (p)", m.osName(), len(m.Rows), m.channelLabel())
 	if len(body) > win {
 		sub += fmt.Sprintf(" · lines %d-%d/%d · pgup/pgdn scroll", start+1, end, len(body))
 	}
@@ -330,15 +435,23 @@ func (m Model) View() string {
 	for i := len(visible); i < win; i++ {
 		b.WriteString("\n")
 	}
-	b.WriteString(m.fit(dim.Render("r run · d doctor · u updates · p pre · t pick · i install · c clear · q quit")))
+	b.WriteString(m.fit(dim.Render(footer)))
 	return b.String()
 }
 
+// footer is the key hint. It fits 80 columns with room to spare, because a
+// truncated hint is a hint for the keys nobody can find.
+const footer = "r run · d doctor · u updates · t pick · i install · m mouse · c clear · q quit"
+
 // Run starts the dashboard. It returns the exit code to use. The toolchain scan
 // runs inside the program, so the first frame is on screen immediately.
+//
+// Mouse capture is deliberately not enabled at startup: it stops the terminal
+// from selecting text, and reading output you want to copy is the whole point.
+// `m` turns it on for wheel scrolling.
 func Run(cfg config.Config, opts Options) (int, error) {
 	m := NewModel(nil, cfg, opts)
-	if _, err := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion()).Run(); err != nil {
+	if _, err := tea.NewProgram(m, tea.WithAltScreen()).Run(); err != nil {
 		return 1, err
 	}
 	return 0, nil
@@ -378,27 +491,104 @@ func Rows(cfg config.Config, opts Options) []LangRow {
 	return rows
 }
 
+// runFile resolves the file `r` should run: an explicit path first, then
+// ZED_FILE, which Zed exports when the dashboard runs as one of its tasks.
+// It reports false when nothing knows, and the caller asks.
+func (m Model) runFile() (string, bool) {
+	if m.opts.File != "" {
+		return m.opts.File, true
+	}
+	if f := strings.TrimSpace(m.env()["ZED_FILE"]); f != "" {
+		return f, true
+	}
+	return "", false
+}
+
+// execRun hands the terminal to `zedrun-go run FILE` and takes it back after,
+// so the program keeps its own stdin, stdout and colour.
+func (m Model) execRun(file string) tea.Cmd {
+	bin, err := os.Executable()
+	if err != nil {
+		bin = "zedrun-go"
+	}
+	return tea.ExecProcess(exec.Command(bin, "run", file),
+		func(err error) tea.Msg { return runDoneMsg{err} })
+}
+
+// updatePrompt handles keys while the run-path prompt is open.
+func (m Model) updatePrompt(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	submit, cancel := m.prompt.handle(msg)
+	switch {
+	case cancel:
+		m.prompt = nil
+		m.append("run: cancelled")
+		m.Scroll = m.bodyLen()
+		m.clamp()
+		return m, nil
+	case submit:
+		file := strings.TrimSpace(m.prompt.text())
+		m.prompt = nil
+		if file == "" {
+			m.append("run: no path given")
+			m.Scroll = m.bodyLen()
+			m.clamp()
+			return m, nil
+		}
+		m.LastAction = "run"
+		m.append("run: " + file)
+		m.Scroll = m.bodyLen()
+		m.clamp()
+		return m, m.execRun(file)
+	}
+	m.clamp()
+	return m, nil
+}
+
+// promptView renders the path prompt: the label, what has been typed with a
+// block cursor, and the key hint pinned to the last row.
+func (m Model) promptView() string {
+	bold := lipgloss.NewStyle().Bold(true)
+	dim := lipgloss.NewStyle().Faint(true)
+	// The input is the second line, not the third: on a short terminal the
+	// clip would otherwise hide what you are typing.
+	lines := []string{
+		m.fit(bold.Render(m.prompt.label)),
+		m.fit("  " + m.prompt.text() + "█"),
+	}
+	win := m.h - 1
+	if win < 1 {
+		win = 1
+	}
+	var b strings.Builder
+	n := 0
+	for _, l := range lines {
+		if n >= win {
+			break
+		}
+		b.WriteString(l + "\n")
+		n++
+	}
+	for ; n < win; n++ {
+		b.WriteString("\n")
+	}
+	b.WriteString(m.fit(dim.Render("type a path · enter run · esc cancel")))
+	return b.String()
+}
+
 func (m *Model) act(name string) {
 	m.LastAction = name
 	switch name {
 	case "run":
-		file := m.opts.File
-		if file == "" {
-			m.append("run: open a file in Zed and press F6, or pass a path to zedrun-go")
+		file, ok := m.runFile()
+		if !ok {
+			m.append("run: no file to run — pass --file, set ZED_FILE, or press r and type a path")
 			return
 		}
-		m.append("run: " + file + " (use zedrun-go run for full output)")
+		m.append("run: " + file)
 	case "doctor":
-		report := doctor.Collect(m.cfg, m.opts.Cache, m.env(), m.osName(), nil)
-		var b strings.Builder
-		doctor.Render(report, &b, false)
-		for _, line := range strings.Split(strings.TrimRight(b.String(), "\n"), "\n") {
-			m.append(line)
-		}
+		m.append(m.doctorText())
 	case "updates":
-		for _, line := range m.updateLines() {
-			m.append(line)
-		}
+		m.appendLines(m.updateLines())
 	case "pick":
 		row := m.selected()
 		cs := m.choicesFor(row.Language)
@@ -534,6 +724,21 @@ func (m Model) pickerView() string {
 	return b.String()
 }
 
+// doctorText renders the diagnostics report. Slow enough on a cold cache that
+// callers should run it in a command, not inside Update.
+func (m *Model) doctorText() string {
+	cache := m.opts.Cache
+	if cache == nil {
+		// The dashboard always passes a cache; tests and embedders may not.
+		// Without one doctor re-lists every directory once per tool.
+		cache = detect.NewProbeCache("")
+	}
+	report := doctor.Collect(m.cfg, cache, m.env(), m.osName(), nil)
+	var b strings.Builder
+	doctor.Render(report, &b, false)
+	return strings.TrimRight(b.String(), "\n")
+}
+
 func (m *Model) updateLines() []string {
 	if m.opts.Fetcher == nil {
 		return []string{"updates: no version source configured"}
@@ -594,6 +799,12 @@ func (m *Model) append(s string) {
 	}
 	if over := len(m.Output) - maxOutput; over > 0 {
 		m.Output = append([]string(nil), m.Output[over:]...)
+	}
+}
+
+func (m *Model) appendLines(lines []string) {
+	for _, l := range lines {
+		m.append(l)
 	}
 }
 

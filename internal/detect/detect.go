@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/zedrun/zedrun-go/internal/catalog"
@@ -52,6 +53,7 @@ type cacheEntry struct {
 // file is ignored rather than fatal.
 type ProbeCache struct {
 	path string
+	mu   sync.Mutex
 	m    map[string]cacheEntry
 	dirs *platform.DirCache
 }
@@ -59,10 +61,17 @@ type ProbeCache struct {
 // Dirs returns the per-run directory-listing cache, creating it on first use.
 // Sharing it across every tool probed in one run is what keeps `doctor` from
 // re-listing the same directories once per tool.
+//
+// The dashboard probes from several goroutines at once — the startup scan, the
+// update check, the picker — so the lazy init is guarded. Unguarded, each
+// goroutine built its own DirCache: a data race, and a silent loss of exactly
+// the sharing this exists to provide.
 func (c *ProbeCache) Dirs() *platform.DirCache {
 	if c == nil {
 		return nil
 	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if c.dirs == nil {
 		c.dirs = platform.NewDirCache()
 	}
@@ -92,7 +101,9 @@ func (c *ProbeCache) Get(path string, mtime, size int64) (Install, bool) {
 	if c == nil {
 		return Install{}, false
 	}
+	c.mu.Lock()
 	e, ok := c.m[path]
+	c.mu.Unlock()
 	if !ok || e.Mtime != mtime || e.Size != size {
 		return Install{}, false
 	}
@@ -104,6 +115,8 @@ func (c *ProbeCache) Put(inst Install, mtime, size int64) {
 	if c == nil {
 		return
 	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if c.m == nil {
 		c.m = map[string]cacheEntry{}
 	}
@@ -118,7 +131,9 @@ func (c *ProbeCache) Save() error {
 	if err := os.MkdirAll(filepath.Dir(c.path), 0o755); err != nil {
 		return err
 	}
+	c.mu.Lock()
 	data, err := json.MarshalIndent(c.m, "", "  ")
+	c.mu.Unlock()
 	if err != nil {
 		return err
 	}

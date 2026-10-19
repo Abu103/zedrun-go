@@ -134,20 +134,44 @@ Then open the dashboard — `zedrun-go` with no arguments:
 | key | action |
 |-----|--------|
 | `↑` `↓` / `k` `j` | move between languages |
-| `PgUp` `PgDn` / `Ctrl+U` `Ctrl+D` | scroll the view (or use the wheel) |
+| `PgUp` `PgDn` / `Ctrl+U` `Ctrl+D` | scroll the view |
 | `Home` `End` / `g` `G` | jump to the top / bottom |
+| `r` | run a file — see below for where the path comes from |
 | `d` | doctor |
+| `u` | check installed versions against the latest (`p` picks the channel) |
 | `t` | pick a toolchain for the highlighted language |
 | `i` | preview the Zed install; press `i` again to apply |
+| `m` | turn mouse capture on (the wheel scrolls) or off |
 | `c` | clear the output pane |
 | `p` | toggle pre-release for the update check |
 | `q` / `Esc` / `Ctrl+C` | quit |
 
 The view is windowed to your terminal and the footer always stays on the last
-row, so the key hints never scroll away.
+row, so the key hints never scroll away. Long output **wraps** rather than
+truncating, so the actionable end of a line — a flag, a path — stays readable.
 
-`r` (run) and `u` (check updates) are in the dashboard but not yet wired up —
-use `zedrun-go run FILE` and `zedrun-go outdated` from the CLI for now.
+`d` and `u` run in the background: both do real work (directory walks, network
+round trips) and the dashboard stays responsive while they finish.
+
+### Mouse capture is off by default
+
+Mouse capture stops the terminal from selecting text, and reading output you
+may want to copy is the point of this dashboard. So it starts off, and the
+wheel is handled by your terminal as arrow keys — which move the language
+cursor and scroll to follow it. Press `m` when you want the wheel to scroll the
+pane directly; press it again to get text selection back.
+
+### Where `r` gets its file
+
+In order:
+
+1. `--file PATH` — `zedrun-go --file main.py`
+2. `$ZED_FILE` — Zed exports this when the dashboard runs as one of its tasks
+3. otherwise the dashboard asks, and you type a path
+
+```sh
+zedrun-go --file src/main.py    # dashboard opens knowing what to run
+```
 
 Piped or non-interactive output falls back to plain text, so the same binary
 works in scripts and CI.

@@ -46,6 +46,7 @@ var commandNames = []string{
 const usage = `zedrun-go — Code Runner for Zed
 
 usage: zedrun-go <command> [options]
+         zedrun-go [--file PATH]          open the dashboard
 
 commands:
   run        run a file                     run FILE [args…] [--release] [--tool T] [--timeout S]
@@ -78,6 +79,16 @@ func MainWith(args []string, out, errOut io.Writer, opts Options) int {
 		osName = platform.OSName("")
 	}
 
+	// `zedrun-go --file PATH` opens the dashboard already knowing what to run.
+	// Options.File is the first source the dashboard's `r` key tries, and this
+	// is the only thing that sets it, so without this that fallback is dead.
+	if file, rest, ferr := parseFileFlag(args); ferr != nil {
+		fmt.Fprintln(errOut, ferr)
+		return 2
+	} else if file != "" {
+		opts.File = file
+		args = rest
+	}
 	if len(args) == 0 {
 		return cmdTUI(out, errOut, opts, env, osName)
 	}
@@ -796,7 +807,7 @@ func cmdTUI(out, errOut io.Writer, opts Options, env map[string]string, osName s
 		return 0
 	}
 	code, err := tui.Run(cfg, tui.Options{
-		Env: env, OS: osName, Cache: cache, Fetcher: opts.Fetcher, File: opts.File,
+		Env: env, OS: osName, Cache: cache, Fetcher: tuiFetcher(opts, env, osName), File: opts.File,
 	})
 	_ = cache.Save()
 	if err != nil {
@@ -804,6 +815,35 @@ func cmdTUI(out, errOut io.Writer, opts Options, env map[string]string, osName s
 		return 1
 	}
 	return code
+}
+
+// tuiFetcher returns the version-source fetcher the dashboard should use. The
+// TUI is normally launched with none, and without one every update check
+// reports "no version source configured" — so build the same one `outdated`
+// does rather than leaving the key dead.
+func tuiFetcher(opts Options, env map[string]string, osName string) *sources.Fetcher {
+	if opts.Fetcher != nil {
+		return opts.Fetcher
+	}
+	return sources.NewFetcher(filepath.Join(platform.CacheDir(env, osName), "sources.json"), 6*time.Hour, nil)
+}
+
+// parseFileFlag pulls `--file PATH` or `--file=PATH` off the front of args and
+// returns what is left. It exists so the dashboard's `r` key has a file to run.
+func parseFileFlag(args []string) (file string, rest []string, err error) {
+	if len(args) == 0 {
+		return "", args, nil
+	}
+	switch {
+	case args[0] == "--file":
+		if len(args) < 2 {
+			return "", nil, errors.New("--file needs a path")
+		}
+		return args[1], args[2:], nil
+	case strings.HasPrefix(args[0], "--file="):
+		return strings.TrimPrefix(args[0], "--file="), args[1:], nil
+	}
+	return "", args, nil
 }
 
 func isTTY() bool {

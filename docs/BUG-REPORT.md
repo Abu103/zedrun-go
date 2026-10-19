@@ -1,5 +1,11 @@
 # zedrun-go dashboard — bug report
 
+> **Resolved.** All six defects below are fixed, and `bugrepro_test.go` now
+> asserts the corrected behaviour instead of logging it. Two further defects
+> were found later by running the fixed binary — `u` had no version source and
+> `r` had no file source — and are fixed too. This file is kept as the record of
+> what was wrong and how each claim was measured.
+
 Scope: `internal/tui` (the `zedrun-go` dashboard, shown when the binary is run
 with no arguments). The CLI and the core are **not** in scope — `run`, `which`,
 `doctor`, `outdated`, `use`, `pick`, `install`, `uninstall`, `languages` and
