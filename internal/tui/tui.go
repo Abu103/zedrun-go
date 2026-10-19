@@ -747,40 +747,49 @@ func (m *Model) updateLines() []string {
 	if m.Pre {
 		channel = "pre"
 	}
-	ids := make([]string, 0, len(sources.Products))
-	for id := range sources.Products {
+	env, osName := m.env(), m.osName()
+	cache := m.opts.Cache
+	if cache == nil {
+		cache = detect.NewProbeCache("")
+	}
+
+	ids := make([]string, 0, len(catalog.Tools))
+	for id := range catalog.Tools {
 		ids = append(ids, id)
 	}
 	sort.Strings(ids)
 
+	// Driven by what is installed, not by which products happen to have a
+	// version feed. Walking sources.Products skipped every tool without one, so
+	// a machine with perl, sqlite3 and bash installed showed none of them and
+	// the list was shorter than the machine's actual toolchain count. A tool
+	// with no feed now says so instead of disappearing.
 	var lines []string
+	compared := map[string]bool{}
 	for _, id := range ids {
-		p := sources.Products[id]
-		inst, ok := m.firstInstall(p)
-		if !ok {
-			continue
+		for _, inst := range detect.FindInstalls(catalog.GetTool(id), m.cfg, cache, true, env, osName) {
+			if !inst.OK {
+				continue
+			}
+			p, hasSource := sources.ProductForTool(inst.Tool)
+			if !hasSource {
+				lines = append(lines, fmt.Sprintf("%-8s %-12s %-12s %-11s %s",
+					inst.Tool, inst.Version, "-", "no source", "nothing to compare against"))
+				continue
+			}
+			// One line per product: clang and clang++ share a release feed.
+			if compared[p.ID] {
+				continue
+			}
+			compared[p.ID] = true
+			state, target, bump := versions.Judge(inst.Version, sources.FetchLatest(p, m.opts.Fetcher), channel)
+			lines = append(lines, fmt.Sprintf("%-8s %-12s %-12s %-11s %s", p.ID, inst.Version, target, state, bump))
 		}
-		state, target, bump := versions.Judge(inst.Version, sources.FetchLatest(p, m.opts.Fetcher), channel)
-		lines = append(lines, fmt.Sprintf("%-8s %-12s %-12s %-11s %s", id, inst.Version, target, state, bump))
 	}
 	if len(lines) == 0 {
 		return []string{"no toolchains installed to check"}
 	}
 	return lines
-}
-
-func (m *Model) firstInstall(p sources.Product) (detect.Install, bool) {
-	env := m.env()
-	osName := m.osName()
-	for _, id := range p.Tools {
-		installs := detect.FindInstalls(catalog.GetTool(id), m.cfg, m.opts.Cache, false, env, osName)
-		for _, in := range installs {
-			if in.OK {
-				return in, true
-			}
-		}
-	}
-	return detect.Install{}, false
 }
 
 func (m *Model) selected() LangRow {

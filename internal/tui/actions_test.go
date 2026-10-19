@@ -3,6 +3,8 @@ package tui
 import (
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -437,4 +439,92 @@ func TestScrollClampAccountsForWrappedLines(t *testing.T) {
 func lastLine(s string) string {
 	lines := strings.Split(strings.TrimRight(s, "\n"), "\n")
 	return lines[len(lines)-1]
+}
+
+// The list is driven by what is installed, not by which products happen to have
+// a version feed. perl has no feed, so it used to be invisible even when
+// installed — the dashboard reported fewer toolchains than the machine had, and
+// nothing said why.
+func TestUpdateCheckListsInstalledToolsWithNoSource(t *testing.T) {
+	dir := t.TempDir()
+	perl := filepath.Join(dir, "perl")
+	script := "#!/bin/sh\necho 'This is perl 5, version 38, subversion 2 (v5.38.2)'\n"
+	if err := os.WriteFile(perl, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	home := t.TempDir()
+	m := NewModel(rows(), config.Default(), Options{
+		Env: map[string]string{
+			"HOME": home, "PATH": dir,
+			"XDG_CONFIG_HOME": filepath.Join(home, ".config"),
+			"XDG_CACHE_HOME":  filepath.Join(home, ".cache"),
+			"XDG_DATA_HOME":   filepath.Join(home, ".local", "share"),
+		},
+		OS: "linux",
+	})
+	m.opts.Fetcher = sources.NewFetcher(t.TempDir()+"/sources.json", time.Minute,
+		func(string) ([]byte, error) { return nil, errors.New("offline") })
+
+	got := strings.Join(m.updateLines(), "\n")
+	if !strings.Contains(got, "perl") {
+		t.Errorf("an installed toolchain with no version source was omitted:\n%s", got)
+	}
+	if !strings.Contains(got, "no source") {
+		t.Errorf("the reason it cannot be checked is not stated:\n%s", got)
+	}
+	if !strings.Contains(got, "5.38.2") {
+		t.Errorf("the installed version is missing:\n%s", got)
+	}
+}
+
+// A machine with nothing installed must still say so rather than print a header.
+// OS is windows because the candidate paths for it cannot exist on this host —
+// with OS linux the tool deliberately finds /usr/bin/bash and friends even when
+// PATH is empty, which is the point of the tool and makes the case unreachable.
+func TestUpdateCheckWithNothingInstalled(t *testing.T) {
+	home := t.TempDir()
+	m := NewModel(rows(), config.Default(), Options{
+		Env: map[string]string{
+			"HOME": home, "PATH": filepath.Join(home, "empty"),
+			"USERPROFILE": home, "APPDATA": filepath.Join(home, "AppData", "Roaming"),
+			"LOCALAPPDATA": filepath.Join(home, "AppData", "Local"),
+		},
+		OS: "windows",
+	})
+	m.opts.Fetcher = sources.NewFetcher(t.TempDir()+"/sources.json", time.Minute,
+		func(string) ([]byte, error) { return nil, errors.New("offline") })
+
+	got := strings.Join(m.updateLines(), "\n")
+	if !strings.Contains(got, "no toolchains installed") {
+		t.Errorf("empty machine output = %q", got)
+	}
+}
+
+// The tool searches well-known system directories, not just PATH: a machine
+// whose PATH is broken is exactly the machine it exists to diagnose.
+func TestUpdateCheckFindsToolchainsOutsidePath(t *testing.T) {
+	home := t.TempDir()
+	m := NewModel(rows(), config.Default(), Options{
+		Env: map[string]string{
+			"HOME": home, "PATH": filepath.Join(home, "empty"),
+			"XDG_CONFIG_HOME": filepath.Join(home, ".config"),
+			"XDG_CACHE_HOME":  filepath.Join(home, ".cache"),
+			"XDG_DATA_HOME":   filepath.Join(home, ".local", "share"),
+		},
+		OS: "linux",
+	})
+	m.opts.Fetcher = sources.NewFetcher(t.TempDir()+"/sources.json", time.Minute,
+		func(string) ([]byte, error) { return nil, errors.New("offline") })
+
+	lines := m.updateLines()
+	got := strings.Join(lines, "\n")
+	if strings.Contains(got, "no toolchains installed") {
+		t.Skip("this host has no toolchains in the standard system directories")
+	}
+	for _, l := range lines {
+		if strings.Contains(l, "no source") {
+			return
+		}
+	}
+	t.Errorf("every line claims a version source, but PATH was empty:\n%s", got)
 }
