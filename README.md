@@ -117,17 +117,25 @@ main.c: c
   path     /usr/bin/gcc
 ```
 
-Check what's out of date:
+Check what's out of date — and how to fix each one:
 
 ```console
 $ zedrun-go outdated
 Tool     Installed    Latest       Status      Bump
 ----------------------------------------------------
+bash     5.2.21       5.3          outdated    minor
+         update: apt-get install --only-upgrade -y bash
 gcc      13.3.0       16.2.0       outdated    major
-go       1.24.0       go1.24.3     outdated    patch
-node     24.22.0      v24.22.0     up-to-date
+         update: apt-get install --only-upgrade -y gcc
+node     24.22.0      24.22.0      up-to-date
 python   3.12.3       3.13.7       outdated    minor
+         update: apt-get install --only-upgrade -y python3
 ```
+
+The version sources are the projects' own: GNU's FTP directory for bash, php.net's
+release index, metacpan for perl, sqlite.org's changelog, CRAN for R, and the
+GitHub/GitLab release feeds for ruby, TypeScript, Swift, Lua and GHC. A tool with
+no feed says `no source` rather than disappearing.
 
 Then open the dashboard — `zedrun-go` with no arguments:
 
@@ -139,8 +147,10 @@ Then open the dashboard — `zedrun-go` with no arguments:
 | `r` | run a file — see below for where the path comes from |
 | `d` | doctor |
 | `u` | check installed versions against the latest (`p` picks the channel) |
+| `U` | **update the outdated ones** — runs the check, then offers each fix |
 | `t` | pick a toolchain for the highlighted language |
 | `g` | **get a toolchain** — the install menu, see below |
+| `U` | **update what is outdated** — the update menu, see below |
 | `i` | preview the Zed install; press `i` again to apply |
 | `m` | turn mouse capture on (the wheel scrolls) or off |
 | `c` | clear the output pane |
@@ -161,6 +171,26 @@ may want to copy is the point of this dashboard. So it starts off, and the
 wheel is handled by your terminal as arrow keys — which move the language
 cursor and scroll to follow it. Press `m` when you want the wheel to scroll the
 pane directly; press it again to get text selection back.
+
+### The `U` key updates what is outdated
+
+`u` already reports which toolchains are behind. `U` goes one step further: it
+runs the check and then lists the ones that can actually be fixed here, with the
+command each would run.
+
+```console
+update toolchains
+
+2 outdated — enter runs the highlighted update
+
+  bash      5.2.21     → 5.3        apt-get install --only-upgrade -y bash
+  python    3.13.7     → 3.16.0     apt-get install --only-upgrade -y python3
+```
+
+The command is the one the manager that owns the tool would run — `apt-get
+install --only-upgrade` on a distro package, `npm install -g typescript@latest`
+for an npm-installed one — so updating does not stack a second copy beside the
+first. A tool that nothing on this machine can update is not offered.
 
 ### The `g` key installs a toolchain
 

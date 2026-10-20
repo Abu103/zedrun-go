@@ -5,8 +5,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/zedrun/zedrun-go/internal/detect"
+	"github.com/zedrun/zedrun-go/internal/sources"
 )
 
 // getOpts is testOpts with a PATH that contains only the fakes the test writes,
@@ -404,5 +406,42 @@ func TestGetReusesTheProbeCache(t *testing.T) {
 	}
 	if !strings.Contains(out, "gcc") {
 		t.Fatalf("the second run lost the route list:\n%s", out)
+	}
+}
+
+// An outdated tool must say how to update it, not just that it is outdated.
+func TestOutdatedNamesTheUpdateCommand(t *testing.T) {
+	opts := getOpts(t)
+	putSudo(t, opts)
+	put(t, opts, "apt-get", "#!/bin/sh\nexit 0\n")
+	node := filepath.Join(opts.Env["HOME"], "bin", "node")
+	if err := os.MkdirAll(filepath.Dir(node), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(node, []byte("#!/bin/sh\necho 'v20.0.0'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(opts.Env["HOME"], ".zedrun.json"), `{"paths": {"node": "`+node+`"}}`)
+
+	opts.ProjectStart = opts.Env["HOME"]
+	opts.Fetcher = sources.NewFetcher("", time.Hour, func(url string) ([]byte, error) {
+		switch url {
+		case "https://nodejs.org/dist/index.json":
+			return []byte(`[{"version":"v22.10.0","lts":"Jod"}]`), nil
+		case "https://nodejs.org/download/rc/index.json":
+			return []byte(`[]`), nil
+		}
+		return nil, os.ErrNotExist
+	})
+
+	_, out, errOut := run(t, opts, "outdated")
+	if errOut != "" {
+		t.Fatalf("stderr: %s", errOut)
+	}
+	if !strings.Contains(out, "outdated") {
+		t.Fatalf("node was not reported outdated:\n%s", out)
+	}
+	if !strings.Contains(out, "update: winget") && !strings.Contains(out, "update: apt-get") {
+		t.Fatalf("the update command is missing:\n%s", out)
 	}
 }

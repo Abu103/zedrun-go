@@ -540,7 +540,16 @@ func cmdOutdated(args []string, out, errOut io.Writer, opts Options, env map[str
 		if state == "outdated" {
 			anyOutdated = true
 		}
-		rows = append(rows, row{inst.Tool, inst.Version, target, state, bump})
+		// "outdated" on its own is a complaint. Say what would fix it, and say
+		// it through the same engine the get --update command uses, so the two
+		// cannot disagree about how a tool is updated.
+		update := ""
+		if state == "outdated" {
+			if m, ok := updateRoute(inst.Tool, cfg, cache, env, osName); ok {
+				update = m.Command()
+			}
+		}
+		rows = append(rows, row{tool: inst.Tool, installed: inst.Version, latest: target, status: state, bump: bump, update: update})
 	}
 	_ = cache.Save()
 
@@ -549,7 +558,7 @@ func cmdOutdated(args []string, out, errOut io.Writer, opts Options, env map[str
 		for _, r := range rows {
 			list = append(list, map[string]string{
 				"tool": r.tool, "installed": r.installed, "latest": r.latest,
-				"status": r.status, "bump": r.bump,
+				"status": r.status, "bump": r.bump, "update": r.update,
 			})
 		}
 		data, err := json.MarshalIndent(list, "", "  ")
@@ -564,6 +573,9 @@ func cmdOutdated(args []string, out, errOut io.Writer, opts Options, env map[str
 		for _, r := range rows {
 			fmt.Fprintf(out, "%-8s %-12s %-12s %-11s %s\n",
 				r.tool, orDash(r.installed), orDash(r.latest), r.status, r.bump)
+			if r.update != "" {
+				fmt.Fprintf(out, "%-8s %s\n", "", "update: "+r.update)
+			}
 		}
 	}
 	if failOn && anyOutdated {
@@ -572,8 +584,32 @@ func cmdOutdated(args []string, out, errOut io.Writer, opts Options, env map[str
 	return 0
 }
 
-// outdatedRow is one line of the `outdated` report.
-type outdatedRow struct{ tool, installed, latest, status, bump string }
+// outdatedRow is one line of the `outdated` report. update is the command that
+// would fix an outdated tool, empty when nothing on this machine can do it.
+type outdatedRow struct{ tool, installed, latest, status, bump, update string }
+
+// updateRoute finds the command that updates a tool through the manager that
+// owns it. The second result is false when the tool is not managed by anything
+// this machine can drive, which is reported as no hint rather than a promise.
+func updateRoute(tool string, cfg config.Config, cache *detect.ProbeCache, env map[string]string, osName string) (provision.Method, bool) {
+	detected := provision.Detected(cfg, cache, env, osName)
+	origin := ""
+	for _, in := range detect.FindInstalls(catalog.GetTool(tool), cfg, cache, false, env, osName) {
+		if in.OK {
+			origin = in.Origin
+			break
+		}
+	}
+	ms := provision.Available(tool, osName, detected, false)
+	ms = provision.Order(ms, provision.OwnerFor(origin))
+	for _, m := range ms {
+		if argv, ok := m.Update(); ok {
+			m.Argv = argv
+			return m, true
+		}
+	}
+	return provision.Method{}, false
+}
 
 func orDash(s string) string {
 	if s == "" {

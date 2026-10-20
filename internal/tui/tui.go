@@ -72,6 +72,17 @@ type Model struct {
 	// getMenu is non-nil while the `g` install overlay is open.
 	getMenu *getMenu
 
+	// updMenu is non-nil while the `U` update overlay is open.
+	updMenu *updMenu
+
+	// upd collects the outdated tools during an update check, so the U overlay
+	// does not have to re-run the whole network pass to offer them.
+	upd []updChoice
+
+	// wantUpd is set by the U key: the check it triggers should open the update
+	// overlay when it finishes, rather than leaving the user to press U again.
+	wantUpd bool
+
 	cfg  config.Config
 	opts Options
 	w, h int
@@ -117,6 +128,20 @@ type getMenu struct {
 	cursor  int
 }
 
+// updChoice is one outdated tool and the command that would update it.
+type updChoice struct {
+	tool      string
+	installed string
+	latest    string
+	method    provision.Method
+}
+
+// updMenu is the update overlay: what is outdated, and how to fix it.
+type updMenu struct {
+	choices []updChoice
+	cursor  int
+}
+
 // handle applies one key and reports whether the prompt was submitted or
 // cancelled. Anything else is editing.
 func (p *pathPrompt) handle(msg tea.KeyMsg) (submit, cancel bool) {
@@ -158,8 +183,13 @@ type rowsMsg []LangRow
 // runDoneMsg reports a finished `r` run.
 type runDoneMsg struct{ err error }
 
-// updatesMsg carries a finished update check into the model.
-type updatesMsg struct{ lines []string }
+// updatesMsg carries a finished update check into the model. It carries the
+// outdated tools too: the command that fills it runs against a copy of the
+// model, so anything that copy collected has to travel in the message.
+type updatesMsg struct {
+	lines []string
+	upd   []updChoice
+}
 
 // doctorMsg carries a finished diagnostics run into the model.
 type doctorMsg struct{ text string }
@@ -200,6 +230,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case updatesMsg:
 		m.updatesRunning = false
 		m.appendLines(msg.lines)
+		m.upd = msg.upd
+		m.Scroll = m.bodyLen()
+		m.clamp()
+		if m.wantUpd {
+			m.wantUpd = false
+			m.openUpdMenu()
+		}
+		return m, nil
+	case updDoneMsg:
+		m.append(msg.text)
 		m.Scroll = m.bodyLen()
 		m.clamp()
 		return m, nil
@@ -235,6 +275,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.getMenu != nil {
 			return m.updateGetMenu(msg)
+		}
+		if m.updMenu != nil {
+			return m.updateUpdMenu(msg)
 		}
 		wasConfirm := m.confirmInstall
 		m.confirmInstall = false
@@ -314,13 +357,39 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			m.updatesRunning = true
+			m.upd = nil
 			m.append("checking for updates…")
 			m.Scroll = m.bodyLen()
 			m.clamp()
 			// Every product's version source is a network round trip. Running
 			// that inside Update freezes the dashboard until the slowest one
 			// answers, so it goes out as a command and reports back.
-			return m, func() tea.Msg { return updatesMsg{m.updateLines()} }
+			return m, m.checkCmd()
+		case "U":
+			m.LastAction = "update"
+			// The overlay is only as good as the list behind it, and that list
+			// is filled by a network pass. Run it, then open the overlay when
+			// it lands — pressing U on a cold dashboard would otherwise show
+			// an empty menu.
+			if m.updatesRunning {
+				m.append("update: already checking")
+				m.Scroll = m.bodyLen()
+				m.clamp()
+				return m, nil
+			}
+			if m.opts.Fetcher == nil {
+				m.append("update: no version source configured")
+				m.Scroll = m.bodyLen()
+				m.clamp()
+				return m, nil
+			}
+			m.updatesRunning = true
+			m.wantUpd = true
+			m.upd = nil
+			m.append("checking for updates…")
+			m.Scroll = m.bodyLen()
+			m.clamp()
+			return m, m.checkCmd()
 		case "t":
 			m.act("pick")
 			m.Scroll = m.bodyLen()
@@ -437,6 +506,9 @@ func (m Model) View() string {
 	if m.getMenu != nil {
 		return m.getViewMenu()
 	}
+	if m.updMenu != nil {
+		return m.getViewUpdMenu()
+	}
 	title := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("212"))
 	dim := lipgloss.NewStyle().Faint(true)
 
@@ -480,7 +552,7 @@ func (m Model) View() string {
 //
 // It fits 80 columns with room to spare, because a
 // truncated hint is a hint for the keys nobody can find.
-const footer = "r run · d doctor · u updates · t pick · i zed · g get · m mouse · q quit"
+const footer = "r run · d doctor · u updates · U update · t pick · g get · m mouse · q quit"
 
 // Run starts the dashboard. It returns the exit code to use. The toolchain scan
 // runs inside the program, so the first frame is on screen immediately.
@@ -966,6 +1038,155 @@ func (m Model) getViewMenu() string {
 	return b.String()
 }
 
+// ---- update overlay -------------------------------------------------------
+
+// updateMethod finds the command that would update a tool through the manager
+// that owns it. The second result is false when nothing on this machine can do
+// it, which is the honest answer rather than a promise.
+func (m Model) updateMethod(tool string) (provision.Method, bool) {
+	cache := m.opts.Cache
+	if cache == nil {
+		cache = detect.NewProbeCache("")
+	}
+	env, osName := m.env(), m.osName()
+	detected := provision.Detected(m.cfg, cache, env, osName)
+
+	origin := ""
+	for _, in := range detect.FindInstalls(catalog.GetTool(tool), m.cfg, cache, false, env, osName) {
+		if in.OK {
+			origin = in.Origin
+			break
+		}
+	}
+	ms := provision.Available(tool, osName, detected, false)
+	ms = provision.Order(ms, provision.OwnerFor(origin))
+	for _, method := range ms {
+		if argv, ok := method.Update(); ok {
+			method.Argv = argv
+			return method, true
+		}
+	}
+	return provision.Method{}, false
+}
+
+// openUpdMenu offers the outdated tools collected by the last update check.
+// With nothing to update it says so: an empty menu reads as a bug.
+func (m *Model) openUpdMenu() {
+	if len(m.upd) == 0 {
+		m.append("update: everything is up to date (run u to check)")
+		m.Scroll = m.bodyLen()
+		m.clamp()
+		return
+	}
+	m.updMenu = &updMenu{choices: append([]updChoice(nil), m.upd...)}
+	m.clamp()
+}
+
+// updateUpdMenu handles keys while the update overlay is open.
+func (m Model) updateUpdMenu(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	u := m.updMenu
+	switch msg.String() {
+	case "esc", "q", "ctrl+c":
+		m.updMenu = nil
+	case "up", "k":
+		if u.cursor > 0 {
+			u.cursor--
+		}
+	case "down", "j":
+		if u.cursor < len(u.choices)-1 {
+			u.cursor++
+		}
+	case "enter":
+		if len(u.choices) == 0 {
+			m.updMenu = nil
+			return m, nil
+		}
+		c := u.choices[u.cursor]
+		m.updMenu = nil
+		m.append("update: " + c.tool + " " + c.installed + " → " + c.latest)
+		m.append("update: " + c.method.Command())
+		m.Scroll = m.bodyLen()
+		m.clamp()
+		return m, m.updateCmd(c)
+	}
+	return m, nil
+}
+
+// updateCmd runs one update in the background, like the install overlay.
+func (m Model) updateCmd(c updChoice) tea.Cmd {
+	env, osName := m.env(), m.osName()
+	method := c.method
+	tool := c.tool
+	return func() tea.Msg {
+		argv, ok, note := provision.Elevate(method, osName, os.Geteuid() == 0, env)
+		if !ok {
+			return updDoneMsg{"update: " + note}
+		}
+		method.Argv = argv
+		var log cappedBuffer
+		code := provision.Run(method, provision.RunOptions{
+			Elevate: argv[0] == "sudo",
+			Env:     env,
+			Stdout:  &log,
+			Stderr:  &log,
+			Timeout: 10 * time.Minute,
+		})
+		if log.Len() > 0 {
+			return updDoneMsg{"update:\n" + log.String()}
+		}
+		if code == 0 {
+			return updDoneMsg{"update: " + tool + " done"}
+		}
+		return updDoneMsg{fmt.Sprintf("update: %s exited %d", tool, code)}
+	}
+}
+
+// updDoneMsg carries the outcome of an update back into the model.
+type updDoneMsg struct{ text string }
+
+// getViewUpdMenu renders the update overlay: what is outdated, and the command
+// that fixes it.
+func (m Model) getViewUpdMenu() string {
+	u := m.updMenu
+	sel := lipgloss.NewStyle().Reverse(true)
+	dim := lipgloss.NewStyle().Faint(true)
+
+	var lines []string
+	lines = append(lines, m.fit(lipgloss.NewStyle().Bold(true).Render("update toolchains")), "")
+	lines = append(lines, m.fit(dim.Render(fmt.Sprintf("%d outdated — enter runs the highlighted update", len(u.choices)))), "")
+	for i, c := range u.choices {
+		line := m.fit(fmt.Sprintf("  %-9s %-10s → %-10s %s", c.tool, c.installed, c.latest, c.method.Command()))
+		if i == u.cursor {
+			line = sel.Render(line)
+		}
+		lines = append(lines, line)
+	}
+
+	win := m.h - 1
+	if win < 1 {
+		win = 1
+	}
+	start := 0
+	if cur := u.cursor + 3; cur >= win {
+		start = cur - win + 1
+	}
+	end := start + win
+	if end > len(lines) {
+		end = len(lines)
+	}
+	var b strings.Builder
+	n := 0
+	for _, l := range lines[start:end] {
+		b.WriteString(l + "\n")
+		n++
+	}
+	for ; n < win; n++ {
+		b.WriteString("\n")
+	}
+	b.WriteString(m.fit(dim.Render("↑/↓ select · enter update · esc cancel")))
+	return b.String()
+}
+
 // doctorText renders the diagnostics report. Slow enough on a cold cache that
 // callers should run it in a command, not inside Update.
 func (m *Model) doctorText() string {
@@ -979,6 +1200,25 @@ func (m *Model) doctorText() string {
 	var b strings.Builder
 	doctor.Render(report, &b, false)
 	return strings.TrimRight(b.String(), "\n")
+}
+
+// checkCmd runs the update pass in the background and reports both the lines to
+// show and the outdated tools worth offering an update for.
+func (m *Model) checkCmd() tea.Cmd {
+	fetcher := m.opts.Fetcher
+	return func() tea.Msg {
+		mm := *m
+		lines, upd := mm.collectUpdates(fetcher)
+		return updatesMsg{lines: lines, upd: upd}
+	}
+}
+
+// collectUpdates is updateLines plus the outdated-tool list, so the two are
+// computed together and cannot disagree.
+func (m *Model) collectUpdates(fetcher *sources.Fetcher) ([]string, []updChoice) {
+	m.opts.Fetcher = fetcher
+	lines := m.updateLines()
+	return lines, m.upd
 }
 
 func (m *Model) updateLines() []string {
@@ -1007,12 +1247,22 @@ func (m *Model) updateLines() []string {
 	// the list was shorter than the machine's actual toolchain count. A tool
 	// with no feed now says so instead of disappearing.
 	var lines []string
-	compared := map[string]bool{}
+	// Two separate sets, and they must stay separate: a tool id and a product
+	// id are often the same string (bash, gcc, python), and sharing one map
+	// made the product check drop the tool's only row.
+	seenTool := map[string]bool{}
+	seenProduct := map[string]bool{}
 	for _, id := range ids {
 		for _, inst := range detect.FindInstalls(catalog.GetTool(id), m.cfg, cache, true, env, osName) {
 			if !inst.OK {
 				continue
 			}
+			// One row per tool. Four bash installs are four installs of one
+			// tool, and four identical rows is noise that hides the rest.
+			if seenTool[inst.Tool] {
+				continue
+			}
+			seenTool[inst.Tool] = true
 			p, hasSource := sources.ProductForTool(inst.Tool)
 			if !hasSource {
 				lines = append(lines, fmt.Sprintf("%-8s %-12s %-12s %-11s %s",
@@ -1020,12 +1270,21 @@ func (m *Model) updateLines() []string {
 				continue
 			}
 			// One line per product: clang and clang++ share a release feed.
-			if compared[p.ID] {
+			if seenProduct[p.ID] {
 				continue
 			}
-			compared[p.ID] = true
+			seenProduct[p.ID] = true
 			state, target, bump := versions.Judge(inst.Version, sources.FetchLatest(p, m.opts.Fetcher), channel)
 			lines = append(lines, fmt.Sprintf("%-8s %-12s %-12s %-11s %s", p.ID, inst.Version, target, state, bump))
+			// "outdated" with no way to act on it is a complaint. When a manager
+			// on this machine can do the upgrade, say exactly what it would run,
+			// and keep it for the U overlay.
+			if state == "outdated" {
+				if method, ok := m.updateMethod(inst.Tool); ok {
+					m.upd = append(m.upd, updChoice{tool: inst.Tool, installed: inst.Version, latest: target, method: method})
+					lines = append(lines, fmt.Sprintf("%-8s %s", "", "update: "+method.Command()))
+				}
+			}
 		}
 	}
 	if len(lines) == 0 {

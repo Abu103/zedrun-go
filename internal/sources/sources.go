@@ -56,6 +56,24 @@ var Products = map[string]Product{
 		Params: map[string]string{"url": "https://raw.githubusercontent.com/dotnet/core/main/release-notes/releases-index.json"}, Pkg: "dotnet-sdk"},
 	"python": {ID: "python", Tools: []string{"python"}, Kind: "python-ftp", Params: map[string]string{"url": "https://www.python.org/ftp/python/"}, Pkg: "python"},
 	"gcc":    {ID: "gcc", Tools: []string{"gcc", "g++"}, Kind: "gcc-ftp", Params: map[string]string{"url": "https://ftp.gnu.org/gnu/gcc/"}, Pkg: "gcc"},
+	// --- GNU ftp directories: bash. Same shape as the gcc listing, different
+	// version pattern, so it gets its own provider rather than a second gcc
+	// regex in one function.
+	"bash": {ID: "bash", Tools: []string{"bash"}, Kind: "gnu-ftp", Params: map[string]string{"url": "https://ftp.gnu.org/gnu/bash/"}, Pkg: "bash"},
+	// --- release feeds for tools that had none. Each endpoint below was
+	// checked against the project's own site; the shapes are what the
+	// providers expect.
+	"ruby":  {ID: "ruby", Tools: []string{"ruby"}, Kind: "github-atom", Params: map[string]string{"repo": "ruby/ruby"}, Pkg: "ruby"},
+	"php":   {ID: "php", Tools: []string{"php"}, Kind: "php-json", Params: map[string]string{"url": "https://www.php.net/releases/index.php?json"}, Pkg: "php"},
+	"perl":  {ID: "perl", Tools: []string{"perl"}, Kind: "metacpan", Params: map[string]string{"url": "https://fastapi.metacpan.org/v1/release/perl"}, Pkg: "perl"},
+	"tsc":   {ID: "tsc", Tools: []string{"tsc"}, Kind: "github-atom", Params: map[string]string{"repo": "microsoft/TypeScript"}, Pkg: "typescript"},
+	"swift": {ID: "swift", Tools: []string{"swift"}, Kind: "github-atom", Params: map[string]string{"repo": "swiftlang/swift"}, Pkg: "swift"},
+	"lua":   {ID: "lua", Tools: []string{"lua"}, Kind: "github-atom", Params: map[string]string{"repo": "lua/lua"}, Pkg: "lua"},
+	"r":     {ID: "r", Tools: []string{"r"}, Kind: "cran-ftp", Params: map[string]string{"url": "https://cran.r-project.org/src/base/"}, Pkg: "r-base"},
+	"sqlite3": {ID: "sqlite3", Tools: []string{"sqlite3"}, Kind: "sqlite-changes",
+		Params: map[string]string{"url": "https://sqlite.org/changes.html"}, Pkg: "sqlite"},
+	"ghc": {ID: "ghc", Tools: []string{"ghc", "runghc"}, Kind: "gitlab-tags",
+		Params: map[string]string{"url": "https://gitlab.haskell.org/ghc/ghc/-/tags?format=atom"}, Pkg: "ghc"},
 	"dart": {ID: "dart", Tools: []string{"dart"}, Kind: "dart-version",
 		Params: map[string]string{
 			"stable": "https://storage.googleapis.com/dart-archive/channels/stable/release/latest/VERSION",
@@ -103,6 +121,10 @@ func urlsOf(p Product) []string {
 		return []string{p.Params["url"], p.Params["rc"]}
 	case "dart-version":
 		return []string{p.Params["stable"], p.Params["beta"]}
+	case "gnu-ftp", "sqlite-changes", "cran-ftp", "gitlab-tags":
+		return []string{p.Params["url"]}
+	case "php-json", "metacpan":
+		return []string{p.Params["url"]}
 	default:
 		if u := p.Params["url"]; u != "" {
 			return []string{u}
@@ -245,6 +267,18 @@ func FetchLatest(p Product, f *Fetcher) versions.Latest {
 		l = gccFTP(p, f)
 	case "dart-version":
 		l = dartVersion(p, f)
+	case "gnu-ftp":
+		l = gnuFTP(p, f)
+	case "php-json":
+		l = phpJSON(p, f)
+	case "metacpan":
+		l = metacpan(p, f)
+	case "sqlite-changes":
+		l = sqliteChanges(p, f)
+	case "cran-ftp":
+		l = cranFTP(p, f)
+	case "gitlab-tags":
+		l = gitlabTags(p, f)
 	default:
 		l = versions.Latest{Source: "error: unknown provider kind " + p.Kind}
 	}
@@ -277,11 +311,16 @@ func githubAtom(p Product, f *Fetcher) versions.Latest {
 		if tag == "" {
 			continue
 		}
+		// Compare rather than take the first: a feed is not guaranteed to be
+		// in version order, and the wrong winner is a wrong answer.
 		if isPreTag(tag) {
-			if l.Pre == "" {
+			if _, ok := versions.ParseVersion(tag); !ok {
+				continue // a commit subject, not a release
+			}
+			if l.Pre == "" || greater(tag, l.Pre) {
 				l.Pre = tag
 			}
-		} else if l.Stable == "" {
+		} else if l.Stable == "" || greater(tag, l.Stable) {
 			l.Stable = tag
 		}
 		if l.Stable != "" && l.Pre != "" {
@@ -334,10 +373,13 @@ func githubAPI(p Product, f *Fetcher) versions.Latest {
 		}
 		pre, _ := m["prerelease"].(bool)
 		if pre || isPreTag(tag) {
-			if l.Pre == "" {
+			if _, ok := versions.ParseVersion(tag); !ok {
+				continue
+			}
+			if l.Pre == "" || greater(tag, l.Pre) {
 				l.Pre = tag
 			}
-		} else if l.Stable == "" {
+		} else if l.Stable == "" || greater(tag, l.Stable) {
 			l.Stable = tag
 		}
 	}
@@ -690,6 +732,247 @@ func dartVersion(p Product, f *Fetcher) versions.Latest {
 		return versions.Latest{Source: "error: no dart version in the payload"}
 	}
 	return l
+}
+
+// ---- providers for the tools that had no feed -----------------------------
+
+// gnuFTP reads a GNU release directory. The listing holds the release tarballs
+// alongside .diff, .diff.gz and .sig files, all of which must be ignored: a diff
+// between 5.1.16 and 5.2 would otherwise be read as a version, and a signature
+// as another. The name pattern is what distinguishes a release.
+var gnuTarballRe = regexp.MustCompile(`^bash-(\d+\.\d+(?:\.\d+)?)\.tar\.(?:gz|bz2|xz)$`)
+
+func gnuFTP(p Product, f *Fetcher) versions.Latest {
+	url := p.Params["url"]
+	body, err := f.Text(url)
+	if err != nil {
+		return versions.Latest{Source: "error: " + err.Error()}
+	}
+	l := versions.Latest{Source: url}
+	for _, h := range hrefs(body) {
+		name := strings.Trim(h, "/")
+		m := gnuTarballRe.FindStringSubmatch(name)
+		if m == nil {
+			continue
+		}
+		// The GNU listing carries the pre-release tarballs too
+		// (bash-5.3-rc2.tar.gz). They are not the release, but they are the
+		// newest pre-release, which is a real answer to "what is coming".
+		if isPreTag(name) {
+			if l.Pre == "" || greater(m[1], l.Pre) {
+				l.Pre = m[1]
+			}
+			continue
+		}
+		if l.Stable == "" || greater(m[1], l.Stable) {
+			l.Stable = m[1]
+		}
+	}
+	if l.Stable == "" {
+		return versions.Latest{Source: "error: no stable bash release found"}
+	}
+	return l
+}
+
+func phpJSON(p Product, f *Fetcher) versions.Latest {
+	url := p.Params["url"]
+	v, err := f.JSON(url)
+	if err != nil {
+		return versions.Latest{Source: "error: " + err.Error()}
+	}
+	m, ok := v.(map[string]any)
+	if !ok {
+		return versions.Latest{Source: "error: unexpected php payload"}
+	}
+	l := versions.Latest{Source: url}
+	for _, e := range m {
+		row, ok := e.(map[string]any)
+		if !ok {
+			continue
+		}
+		ver := str(row["version"])
+		if ver == "" {
+			continue
+		}
+		// The index is keyed by major version with the newest supported branch
+		// first, but nothing guarantees that, so the highest version wins.
+		if l.Stable == "" || greater(ver, l.Stable) {
+			l.Stable = ver
+		}
+	}
+	if l.Stable == "" {
+		return versions.Latest{Source: "error: no php release in the payload"}
+	}
+	return l
+}
+
+// metacpan reports perl's version in Perl's internal form (5.044000), which is
+// 5.44.0 and would compare as 5.44.000. The archive filename carries the
+// readable version, so that is what the provider reads.
+var perlArchiveRe = regexp.MustCompile(`^perl-(\d+\.\d+\.\d+)\.tar\.(?:gz|bz2|xz)$`)
+
+func metacpan(p Product, f *Fetcher) versions.Latest {
+	url := p.Params["url"]
+	v, err := f.JSON(url)
+	if err != nil {
+		return versions.Latest{Source: "error: " + err.Error()}
+	}
+	m, ok := v.(map[string]any)
+	if !ok {
+		return versions.Latest{Source: "error: unexpected metacpan payload"}
+	}
+	l := versions.Latest{Source: url}
+	if arch := str(m["archive"]); arch != "" {
+		if mt := perlArchiveRe.FindStringSubmatch(arch); mt != nil {
+			l.Stable = mt[1]
+		}
+	}
+	if l.Stable == "" {
+		// Fall back to the internal version only if it is already in the
+		// readable form; otherwise there is nothing trustworthy to report.
+		if ver := str(m["version"]); ver != "" && !strings.Contains(ver, "000") {
+			l.Stable = ver
+		}
+	}
+	if l.Stable == "" {
+		return versions.Latest{Source: "error: no perl version in the payload"}
+	}
+	return l
+}
+
+var sqliteVersionRe = regexp.MustCompile(`version_(\d+)_(\d+)_(\d+)`)
+
+func sqliteChanges(p Product, f *Fetcher) versions.Latest {
+	url := p.Params["url"]
+	body, err := f.Text(url)
+	if err != nil {
+		return versions.Latest{Source: "error: " + err.Error()}
+	}
+	l := versions.Latest{Source: url}
+	for _, m := range sqliteVersionRe.FindAllStringSubmatch(body, -1) {
+		ver := m[1] + "." + m[2] + "." + m[3]
+		if l.Stable == "" || greater(ver, l.Stable) {
+			l.Stable = ver
+		}
+	}
+	if l.Stable == "" {
+		return versions.Latest{Source: "error: no sqlite version in the payload"}
+	}
+	return l
+}
+
+// cranFTP reads CRAN's source tree. The base directory lists the major-series
+// directories (R-2, R-3, R-4); the newest series is where the current release
+// lives, and inside it the tarballs are the releases. Two requests, and the
+// listing order is alphabetical, so the highest version has to be found rather
+// than the first one taken.
+func cranFTP(p Product, f *Fetcher) versions.Latest {
+	base := p.Params["url"]
+	body, err := f.Text(base)
+	if err != nil {
+		return versions.Latest{Source: "error: " + err.Error()}
+	}
+	var majors []string
+	for _, m := range regexp.MustCompile(`R-(\d+)/`).FindAllStringSubmatch(body, -1) {
+		if !contains(majors, m[1]) {
+			majors = append(majors, m[1])
+		}
+	}
+	if len(majors) == 0 {
+		return versions.Latest{Source: "error: no R series in the CRAN index"}
+	}
+	// Highest series number, not the last one in the listing.
+	series := majors[0]
+	seriesNum := atoiSafe(series)
+	for _, m := range majors {
+		if n := atoiSafe(m); n > seriesNum {
+			series, seriesNum = m, n
+		}
+	}
+	dir := strings.TrimRight(base, "/") + "/R-" + series + "/"
+	dirBody, err := f.Text(dir)
+	if err != nil {
+		return versions.Latest{Source: "error: " + err.Error()}
+	}
+	l := versions.Latest{Source: dir}
+	for _, m := range regexp.MustCompile(`R-(\d+\.\d+\.\d+)\.tar\.gz`).FindAllStringSubmatch(dirBody, -1) {
+		if l.Stable == "" || greater(m[1], l.Stable) {
+			l.Stable = m[1]
+		}
+	}
+	if l.Stable == "" {
+		return versions.Latest{Source: "error: no R release in the CRAN index"}
+	}
+	return l
+}
+
+// gitlabTags reads a GitLab tag feed. GHC's feed carries branch markers like
+// "ghc-10.0-start" alongside real releases; a marker is not a release and would
+// otherwise be reported as newer than everything actually installed.
+// GHC tags its releases both "ghc-9.12.4" and "ghc-9.14.1-release", and marks
+// branches with "ghc-10.0-start". Only the two release forms are versions.
+var ghcReleaseRe = regexp.MustCompile(`^ghc-(\d+\.\d+\.\d+)(?:-release)?$`)
+
+func gitlabTags(p Product, f *Fetcher) versions.Latest {
+	url := p.Params["url"]
+	body, err := f.Text(url)
+	if err != nil {
+		return versions.Latest{Source: "error: " + err.Error()}
+	}
+	l := versions.Latest{Source: url}
+	for _, e := range atomEntries(body) {
+		tag := strings.TrimSpace(e)
+		if tag == "" {
+			continue
+		}
+		if isPreTag(tag) {
+			if l.Pre == "" {
+				l.Pre = tag
+			}
+			continue
+		}
+		m := ghcReleaseRe.FindStringSubmatch(tag)
+		if m == nil {
+			// "-start" and "-release" markers and non-version tags are not
+			// releases; a stable version must come from a plain ghc-X.Y.Z tag.
+			continue
+		}
+		if l.Stable == "" || greater(m[1], l.Stable) {
+			l.Stable = m[1]
+		}
+	}
+	if l.Stable == "" {
+		return versions.Latest{Source: "error: no stable ghc release found"}
+	}
+	return l
+}
+
+// atomEntries lists the <title> values of an Atom feed's entries, skipping the
+// feed's own title.
+func atomEntries(body string) []string {
+	var out []string
+	re := regexp.MustCompile(`(?s)<entry>.*?<title>([^<]*)</title>`)
+	for _, m := range re.FindAllStringSubmatch(body, -1) {
+		out = append(out, m[1])
+	}
+	return out
+}
+
+func contains(xs []string, s string) bool {
+	for _, x := range xs {
+		if x == s {
+			return true
+		}
+	}
+	return false
+}
+
+func atoiSafe(s string) int {
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		return 0
+	}
+	return n
 }
 
 var preKeywords = []string{"alpha", "beta", "rc", "preview", "nightly", "dev", "insiders", "canary", "snapshot", "-ea", "pre"}
