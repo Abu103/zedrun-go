@@ -6,11 +6,15 @@ package provision
 //
 // CONFIDENCE. The "apt" column was checked against a real Ubuntu 24.04
 // repository with `apt-cache policy`, so those names are known to resolve. The
-// dnf/pacman/zypper/apk columns are the distributions' documented names and the
-// winget/choco/scoop/brew/nix columns are the projects' documented ids; none of
-// those have been executed here, because only apt, snap, npm, pip, cargo and
-// rustup exist on the machine this was written on. Treat them as claims to
-// verify, and prefer `--all` when a route is suspect.
+// "apk" column was checked against the Alpine v3.21 package index at
+// pkgs.alpinelinux.org: zig, dotnet8-sdk, openjdk21, php83, ghc, lua5.4,
+// elixir and R are confirmed present, and kotlin and scala are confirmed absent
+// (so they have no apk entry — a package name that cannot resolve is worse than
+// no route). The dnf/pacman/zypper columns and the
+// winget/choco/scoop/brew/nix columns are the distributions' and projects'
+// documented names; none of those have been executed here, because only apt,
+// snap, npm, pip, cargo and rustup exist on the machine this was written on.
+// Treat them as claims to verify, and prefer `--all` when a route is suspect.
 var packages = map[string]map[string]string{
 	"gcc": {
 		"apt": "gcc", "dnf": "gcc", "pacman": "gcc", "zypper": "gcc", "apk": "gcc",
@@ -89,7 +93,9 @@ var packages = map[string]map[string]string{
 		"winget": "Julialang.Julia", "scoop": "julia", "choco": "julia", "brew": "julia", "nix": "julia",
 	},
 	"kotlin": {
-		"apt": "kotlin", "dnf": "kotlin", "pacman": "kotlin", "apk": "kotlin", "snap": "kotlin",
+		// No apk entry: kotlin is not in the Alpine v3.21 index, so offering
+		// one would produce an install that cannot resolve.
+		"apt": "kotlin", "dnf": "kotlin", "pacman": "kotlin", "snap": "kotlin",
 		"winget": "Kotlin.Kotlin", "scoop": "kotlin", "choco": "kotlin", "brew": "kotlin",
 	},
 	"lua": {
@@ -115,7 +121,8 @@ var packages = map[string]map[string]string{
 		"brew": "ruby", "nix": "ruby",
 	},
 	"scala": {
-		"apt": "scala", "dnf": "scala", "pacman": "scala", "apk": "scala", "snap": "scala",
+		// No apk entry: scala is not in the Alpine v3.21 index.
+		"apt": "scala", "dnf": "scala", "pacman": "scala", "snap": "scala",
 		"winget": "Scala.Scala", "scoop": "scala", "choco": "scala", "brew": "scala", "nix": "scala",
 	},
 	"bash": {
@@ -131,7 +138,9 @@ var packages = map[string]map[string]string{
 		"winget": "SQLite.SQLite", "scoop": "sqlite", "choco": "sqlite", "brew": "sqlite", "nix": "sqlite",
 	},
 	"zig": {
-		"snap": "zig", "winget": "zig.zig", "scoop": "zig", "choco": "zig", "brew": "zig", "nix": "zig",
+		// Alpine has zig in community (verified against the v3.21 index).
+		"apk": "zig", "snap": "zig", "winget": "zig.zig", "scoop": "zig", "choco": "zig",
+		"brew": "zig", "nix": "zig",
 	},
 	"swift": {
 		"winget": "Swift.Toolchain", "scoop": "swift", "choco": "swift", "brew": "swift",
