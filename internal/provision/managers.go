@@ -22,6 +22,12 @@ type Manager struct {
 	Update   []string // argv template; "{package}" is replaced
 	Elevated bool     // needs administrator or root
 	OSes     []string // empty means every OS
+	// Candidate, when set, is how to ask this manager what version it can
+	// install for a package. It is nil for managers whose index cannot be read
+	// cheaply, and for those the update check falls back to the vendor's own
+	// version — which is the right answer for npm, pip, cargo and rustup, whose
+	// registries are the vendor.
+	Candidate *VersionProbe
 }
 
 // managerByOS groups the manager table by the OSes it runs on, preserving the
@@ -57,7 +63,15 @@ var Known = []Manager{
 	{Name: "apt", Probe: "apt-get", OSes: []string{"linux"}, Elevated: true,
 		Version: []string{"--version"},
 		Install: []string{"apt-get", "install", "-y", "{package}"},
-		Update:  []string{"apt-get", "install", "--only-upgrade", "-y", "{package}"}},
+		Update:  []string{"apt-get", "install", "--only-upgrade", "-y", "{package}"},
+		// Ubuntu's repositories lag their upstreams badly — golang-go is 1.22
+		// while go.dev publishes 1.27.3 — and a distro package is often not
+		// what installed the tool at all, so `--only-upgrade` would change
+		// nothing. The candidate is read rather than assumed.
+		Candidate: &VersionProbe{
+			Argv: []string{"apt-cache", "policy", "{package}"},
+			Read: aptCandidate,
+		}},
 	{Name: "dnf", OSes: []string{"linux"}, Elevated: true,
 		Version: []string{"--version"},
 		Install: []string{"dnf", "install", "-y", "{package}"},
