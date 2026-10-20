@@ -216,6 +216,43 @@ func Compare(a, b Version) int {
 	return 0
 }
 
+// SameProduct reports whether two version strings describe the same product
+// line: they agree on their leading numeric component.
+//
+// It is what tells a tool's next version from a different product's version.
+// winget's Git.Git reports 2.55.0.5 while bash is at 5.2.21 — different leading
+// component, so that number is Git's and not bash's next one. go's 1.27.0 and
+// 1.26.3 agree on the leading component, so one is the other's successor.
+func SameProduct(a, b string) bool {
+	av, aok := ParseVersion(a)
+	bv, bok := ParseVersion(b)
+	if !aok || !bok {
+		return false
+	}
+	return leading(av) == leading(bv)
+}
+
+// SameVersion reports whether two version strings denote the same release.
+//
+// 7.6.7.0 and 7.6.7 do: winget pads its versions to four components, and a
+// string comparison calls that a difference — which is how a report said a
+// manager "lags upstream" while naming the very version it was about to install.
+func SameVersion(a, b string) bool {
+	av, aok := ParseVersion(a)
+	bv, bok := ParseVersion(b)
+	if !aok || !bok {
+		return a == b
+	}
+	return Compare(av, bv) == 0
+}
+
+func leading(v Version) int {
+	if len(v.Nums) == 0 {
+		return -1
+	}
+	return v.Nums[0]
+}
+
 func component(v Version, i int) int {
 	if i < len(v.Nums) {
 		return v.Nums[i]

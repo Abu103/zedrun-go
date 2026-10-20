@@ -130,10 +130,21 @@ type getMenu struct {
 
 // updChoice is one outdated tool and the command that would update it.
 type updChoice struct {
-	tool      string
-	installed string
-	latest    string
-	method    provision.Method
+	tool       string
+	installed  string
+	latest     string // upstream's latest
+	achievable string // what the command will actually install; "" when unknown
+	method     provision.Method
+}
+
+// installTarget is the version this choice will actually install. A manager that
+// answered for itself wins over upstream's number, because that is the one the
+// command will land.
+func (c updChoice) installTarget() string {
+	if c.achievable != "" {
+		return c.achievable
+	}
+	return c.latest
 }
 
 // updMenu is the update overlay: what is outdated, and how to fix it.
@@ -1040,35 +1051,6 @@ func (m Model) getViewMenu() string {
 
 // ---- update overlay -------------------------------------------------------
 
-// updateMethod finds the command that would update a tool through the manager
-// that owns it. The second result is false when nothing on this machine can do
-// it, which is the honest answer rather than a promise.
-func (m Model) updateMethod(tool string) (provision.Method, bool) {
-	cache := m.opts.Cache
-	if cache == nil {
-		cache = detect.NewProbeCache("")
-	}
-	env, osName := m.env(), m.osName()
-	detected := provision.Detected(m.cfg, cache, env, osName)
-
-	origin := ""
-	for _, in := range detect.FindInstalls(catalog.GetTool(tool), m.cfg, cache, false, env, osName) {
-		if in.OK {
-			origin = in.Origin
-			break
-		}
-	}
-	ms := provision.Available(tool, osName, detected, false)
-	ms = provision.Order(ms, provision.OwnerFor(origin))
-	for _, method := range ms {
-		if argv, ok := method.Update(); ok {
-			method.Argv = argv
-			return method, true
-		}
-	}
-	return provision.Method{}, false
-}
-
 // openUpdMenu offers the outdated tools collected by the last update check.
 // With nothing to update it says so: an empty menu reads as a bug.
 func (m *Model) openUpdMenu() {
@@ -1103,7 +1085,7 @@ func (m Model) updateUpdMenu(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		c := u.choices[u.cursor]
 		m.updMenu = nil
-		m.append("update: " + c.tool + " " + c.installed + " → " + c.latest)
+		m.append("update: " + c.tool + " " + c.installed + " → " + c.installTarget())
 		m.append("update: " + c.method.Command())
 		m.Scroll = m.bodyLen()
 		m.clamp()
@@ -1155,7 +1137,7 @@ func (m Model) getViewUpdMenu() string {
 	lines = append(lines, m.fit(lipgloss.NewStyle().Bold(true).Render("update toolchains")), "")
 	lines = append(lines, m.fit(dim.Render(fmt.Sprintf("%d outdated — enter runs the highlighted update", len(u.choices)))), "")
 	for i, c := range u.choices {
-		line := m.fit(fmt.Sprintf("  %-9s %-10s → %-10s %s", c.tool, c.installed, c.latest, c.method.Command()))
+		line := m.fit(fmt.Sprintf("  %-9s %-10s → %-10s %s", c.tool, c.installed, c.installTarget(), c.method.Command()))
 		if i == u.cursor {
 			line = sel.Render(line)
 		}
@@ -1240,6 +1222,10 @@ func (m *Model) updateLines() []string {
 		ids = append(ids, id)
 	}
 	sort.Strings(ids)
+	detected := provision.Detected(m.cfg, cache, env, osName)
+	// One `winget list` call serves the whole pass: the index is memoised, so a
+	// check touching ten winget packages still asks winget once.
+	wingetIndex := provision.WingetIndexFunc(env, osName)
 
 	// Driven by what is installed, not by which products happen to have a
 	// version feed. Walking sources.Products skipped every tool without one, so
@@ -1278,11 +1264,35 @@ func (m *Model) updateLines() []string {
 			lines = append(lines, fmt.Sprintf("%-8s %-12s %-12s %-11s %s", p.ID, inst.Version, target, state, bump))
 			// "outdated" with no way to act on it is a complaint. When a manager
 			// on this machine can do the upgrade, say exactly what it would run,
-			// and keep it for the U overlay.
+			// and keep it for the U overlay. When nothing can, say that too: a
+			// silent row reads as a bug.
 			if state == "outdated" {
-				if method, ok := m.updateMethod(inst.Tool); ok {
-					m.upd = append(m.upd, updChoice{tool: inst.Tool, installed: inst.Version, latest: target, method: method})
-					lines = append(lines, fmt.Sprintf("%-8s %s", "", "update: "+method.Command()))
+				plan := provision.ResolveUpdate(inst.Tool, osName, inst.Version, target, inst.Origin, detected, env, wingetIndex())
+				if plan.Method.Runnable() {
+					m.upd = append(m.upd, updChoice{
+						tool: inst.Tool, installed: inst.Version, latest: target,
+						achievable: plan.Achievable, method: plan.Method,
+					})
+					hint := "update: " + plan.Method.Command()
+					// The version the command will actually install. winget's own
+					// answer can be older than upstream's — its Go manifest sits
+					// at 1.27.0 while go.dev has 1.27.3 — and promising upstream's
+					// number when the command lands the older one is the bug this
+					// prevents. NextVersion refuses a version that is not newer,
+					// or that belongs to a different product: Git's 2.55.0.5 is not
+					// bash's next.
+					if next := plan.NextVersion(inst.Version); next != "" {
+						hint += " → " + next
+						// "lags" is a claim about versions, not strings: winget
+						// writes 7.6.7.0 where upstream writes 7.6.7, and those
+						// are the same release.
+						if !versions.SameVersion(next, target) {
+							hint += " (" + plan.Method.Manager + " lags upstream " + target + ")"
+						}
+					}
+					lines = append(lines, fmt.Sprintf("%-8s %s", "", hint))
+				} else if plan.Reason != "" {
+					lines = append(lines, fmt.Sprintf("%-8s %s", "", plan.Reason))
 				}
 			}
 		}

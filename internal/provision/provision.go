@@ -342,7 +342,7 @@ func OwnerFor(origin string) string {
 		return "winget"
 	case "pyenv":
 		return "pip"
-	case "WindowsApps":
+	case "WindowsApps", "winget":
 		return "winget"
 	}
 	return ""

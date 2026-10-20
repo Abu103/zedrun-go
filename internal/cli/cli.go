@@ -530,6 +530,10 @@ func cmdOutdated(args []string, out, errOut io.Writer, opts Options, env map[str
 	type row = outdatedRow
 	var rows []row
 	anyOutdated := false
+	detected := provision.Detected(cfg, cache, env, osName)
+	// One `winget list` call serves the whole report: the index is memoised, so a
+	// report touching ten winget packages still asks winget once.
+	wingetIndex := provision.WingetIndexFunc(env, osName)
 	for _, id := range ids {
 		p := sources.Products[id]
 		inst, ok := firstInstall(p, cfg, cache, env, osName)
@@ -543,13 +547,19 @@ func cmdOutdated(args []string, out, errOut io.Writer, opts Options, env map[str
 		// "outdated" on its own is a complaint. Say what would fix it, and say
 		// it through the same engine the get --update command uses, so the two
 		// cannot disagree about how a tool is updated.
-		update := ""
+		update, reason := "", ""
 		if state == "outdated" {
-			if m, ok := updateRoute(inst.Tool, cfg, cache, env, osName); ok {
-				update = m.Command()
+			origin := ""
+			for _, in := range detect.FindInstalls(catalog.GetTool(inst.Tool), cfg, cache, false, env, osName) {
+				if in.OK {
+					origin = in.Origin
+					break
+				}
 			}
+			plan := provision.ResolveUpdate(inst.Tool, osName, inst.Version, target, origin, detected, env, wingetIndex())
+			update, reason = updHint(plan, inst.Version, target)
 		}
-		rows = append(rows, row{tool: inst.Tool, installed: inst.Version, latest: target, status: state, bump: bump, update: update})
+		rows = append(rows, row{tool: inst.Tool, installed: inst.Version, latest: target, status: state, bump: bump, update: update, reason: reason})
 	}
 	_ = cache.Save()
 
@@ -559,6 +569,7 @@ func cmdOutdated(args []string, out, errOut io.Writer, opts Options, env map[str
 			list = append(list, map[string]string{
 				"tool": r.tool, "installed": r.installed, "latest": r.latest,
 				"status": r.status, "bump": r.bump, "update": r.update,
+				"reason": r.reason,
 			})
 		}
 		data, err := json.MarshalIndent(list, "", "  ")
@@ -575,6 +586,8 @@ func cmdOutdated(args []string, out, errOut io.Writer, opts Options, env map[str
 				r.tool, orDash(r.installed), orDash(r.latest), r.status, r.bump)
 			if r.update != "" {
 				fmt.Fprintf(out, "%-8s %s\n", "", "update: "+r.update)
+			} else if r.reason != "" {
+				fmt.Fprintf(out, "%-8s %s\n", "", r.reason)
 			}
 		}
 	}
@@ -585,30 +598,34 @@ func cmdOutdated(args []string, out, errOut io.Writer, opts Options, env map[str
 }
 
 // outdatedRow is one line of the `outdated` report. update is the command that
-// would fix an outdated tool, empty when nothing on this machine can do it.
-type outdatedRow struct{ tool, installed, latest, status, bump, update string }
+// would fix an outdated tool, empty when nothing on this machine can do it; reason
+// says why when it is empty.
+type outdatedRow struct{ tool, installed, latest, status, bump, update, reason string }
 
-// updateRoute finds the command that updates a tool through the manager that
-// owns it. The second result is false when the tool is not managed by anything
-// this machine can drive, which is reported as no hint rather than a promise.
-func updateRoute(tool string, cfg config.Config, cache *detect.ProbeCache, env map[string]string, osName string) (provision.Method, bool) {
-	detected := provision.Detected(cfg, cache, env, osName)
-	origin := ""
-	for _, in := range detect.FindInstalls(catalog.GetTool(tool), cfg, cache, false, env, osName) {
-		if in.OK {
-			origin = in.Origin
-			break
+// updHint renders what an update would do: the command, plus the version it will
+// actually install when the manager has said so.
+//
+// The achievable version is the point. winget's own answer can be older than
+// upstream's — its Go manifest sits at 1.27.0 while go.dev has 1.27.3 — and
+// promising upstream's number when the command lands the older one is the bug
+// this exists to prevent. NextVersion also refuses a version that belongs to a
+// different product, because Git's 2.55.0.5 is Git's version and not bash's
+// next one.
+func updHint(plan provision.UpdateRoute, installed, upstream string) (update, reason string) {
+	if plan.Method.Runnable() {
+		update = plan.Method.Command()
+		if next := plan.NextVersion(installed); next != "" {
+			update += " → " + next
+			// "lags" is a claim about versions, not strings: winget writes
+			// 7.6.7.0 where upstream writes 7.6.7, and those are the same
+			// release.
+			if !versions.SameVersion(next, upstream) {
+				update += " (" + plan.Method.Manager + " lags upstream " + upstream + ")"
+			}
 		}
+		return update, ""
 	}
-	ms := provision.Available(tool, osName, detected, false)
-	ms = provision.Order(ms, provision.OwnerFor(origin))
-	for _, m := range ms {
-		if argv, ok := m.Update(); ok {
-			m.Argv = argv
-			return m, true
-		}
-	}
-	return provision.Method{}, false
+	return "", plan.Reason
 }
 
 func orDash(s string) string {

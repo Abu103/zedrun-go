@@ -124,13 +124,20 @@ $ zedrun-go outdated
 Tool     Installed    Latest       Status      Bump
 ----------------------------------------------------
 bash     5.2.21       5.3          outdated    minor
-         update: apt-get install --only-upgrade -y bash
+         winget's Git.Git is 2.55.0.5, which is not a newer bash (upstream bash 5.3)
 gcc      13.3.0       16.2.0       outdated    major
          update: apt-get install --only-upgrade -y gcc
 node     24.22.0      24.22.0      up-to-date
+perl     5.38.2       5.44.0       outdated    minor
+         no package manager on this machine owns perl; upgrading through one would install a second copy beside it
 python   3.12.3       3.13.7       outdated    minor
          update: apt-get install --only-upgrade -y python3
 ```
+
+The `update:` line names the command and, when the manager has said, the version
+it will actually install — `→ 7.6.7.0` — so a lagging index is visible rather
+than papered over. When no manager owns the tool, the reason says that instead of
+offering a command that would install a second copy.
 
 The version sources are the projects' own: GNU's FTP directory for bash, php.net's
 release index, metacpan for perl, sqlite.org's changelog, CRAN for R, and the
@@ -191,6 +198,14 @@ The command is the one the manager that owns the tool would run — `apt-get
 install --only-upgrade` on a distro package, `npm install -g typescript@latest`
 for an npm-installed one — so updating does not stack a second copy beside the
 first. A tool that nothing on this machine can update is not offered.
+
+A manager may only update a tool it is the confirmed owner of. winget is asked
+what it actually has, because `winget upgrade` has no dry run — it installs — and
+because its index can lag the vendor: winget's Go manifest sits at 1.27.0 while
+go.dev publishes 1.27.3, so the report says so instead of promising 1.27.3. A
+manager that did not install the tool is never asked to upgrade it, since that is
+an install: a node put on the machine by the official installer was offered
+`choco upgrade -y nodejs-lts`, a package choco does not have either.
 
 ### The `g` key installs a toolchain
 

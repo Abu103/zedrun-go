@@ -272,3 +272,133 @@ func pressUpdate(t *testing.T, m Model) Model {
 	updated, _ := mm.Update(cmd())
 	return updated.(Model)
 }
+
+// wingetFixture renders a `winget list` table with the columns padded the way
+// winget pads them, so the offsets the parser reads off the header line up with
+// the rows. Rows are name|id|version|available.
+func wingetFixture(rows ...string) string {
+	widths := []int{34, 22, 12, 12}
+	var b strings.Builder
+	write := func(cells []string) {
+		for i, c := range cells {
+			if i == len(cells)-1 {
+				b.WriteString(c)
+				break
+			}
+			b.WriteString(c)
+			b.WriteString(strings.Repeat(" ", widths[i]-len(c)))
+		}
+		b.WriteString("\n")
+	}
+	write([]string{"Name", "Id", "Version", "Available", "Source"})
+	total := widths[0] + widths[1] + widths[2] + widths[3] + len("Source")
+	b.WriteString(strings.Repeat("-", total) + "\n")
+	for _, r := range rows {
+		f := strings.Split(r, "|")
+		write([]string{f[0], f[1], f[2], f[3], "winget"})
+	}
+	return b.String()
+}
+
+// fakeWinget puts a winget shim on the test PATH that answers `winget list`
+// from a fixed table.
+//
+// The shim cats the table by absolute path rather than through PATH: the test
+// environment's PATH holds only the fakes the test wrote, so a bare `cat` would
+// not be found and the shim would exit 127 — which reads as "winget will not
+// answer" rather than as the table the test meant to serve.
+func fakeWinget(t *testing.T, opts Options, table string) {
+	t.Helper()
+	dir := filepath.Join(opts.Env["HOME"], "bin")
+	fixture := filepath.Join(dir, "winget-list.txt")
+	if err := os.WriteFile(fixture, []byte(table), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	put(t, opts, "winget.exe", "#!/bin/sh\n/bin/cat "+fixture+"\n")
+}
+
+// go.dev has 1.27.3; winget's GoLang.Go manifest sits at 1.27.0. The check must
+// say that rather than promise a version the command cannot install.
+func TestUpdateCheckDoesNotPromiseWhatWingetCannotInstall(t *testing.T) {
+	opts := updOpts(t)
+	opts.OS = "windows"
+	fakeTool(t, opts, "go.exe", "go version go1.27.0 windows/amd64")
+	fakeWinget(t, opts, wingetFixture("Go Programming Language|GoLang.Go|1.27.0|"))
+
+	m := NewModel(rows(), config.Default(), opts)
+	m.opts.Fetcher = sources.NewFetcher("", time.Minute, func(url string) ([]byte, error) {
+		if strings.Contains(url, "go.dev") {
+			return []byte(`[{"version":"go1.27.3","stable":true}]`), nil
+		}
+		return nil, errors.New("offline")
+	})
+
+	out := strings.Join(pressUpdate(t, m).Output, "\n")
+	if !strings.Contains(out, "nothing newer than 1.27.0") {
+		t.Fatalf("did not say winget has nothing newer:\n%s", out)
+	}
+	if strings.Contains(out, "update: winget") {
+		t.Fatalf("offered a command winget cannot honour:\n%s", out)
+	}
+}
+
+// When winget does have a newer version, the hint names the version it will
+// install — which can be older than upstream's.
+func TestUpdateCheckNamesTheVersionWingetWillInstall(t *testing.T) {
+	opts := updOpts(t)
+	opts.OS = "windows"
+	fakeTool(t, opts, "pwsh.exe", "7.6.6")
+	fakeWinget(t, opts, wingetFixture("PowerShell 7-x64|Microsoft.PowerShell|7.6.6.0|7.6.7.0"))
+
+	m := NewModel(rows(), config.Default(), opts)
+	// pwsh's feed is the GitHub atom feed, so the fixture has to be atom: the
+	// provider unmarshals XML and a JSON body is a parse error, not a version.
+	m.opts.Fetcher = sources.NewFetcher("", time.Minute, func(url string) ([]byte, error) {
+		if strings.Contains(url, "github.com/PowerShell") {
+			return []byte(`<?xml version="1.0"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <entry><title>v7.6.7</title></entry>
+  <entry><title>v7.6.6</title></entry>
+</feed>`), nil
+		}
+		return nil, errors.New("offline")
+	})
+
+	out := strings.Join(pressUpdate(t, m).Output, "\n")
+	if !strings.Contains(out, "update: winget upgrade --id Microsoft.PowerShell") {
+		t.Fatalf("no winget command offered:\n%s", out)
+	}
+	if !strings.Contains(out, "→ 7.6.7.0") {
+		t.Fatalf("did not name the version the command installs:\n%s", out)
+	}
+}
+
+// A tool whose winget package is not installed must not be offered that
+// command: it would install a second copy beside the first.
+func TestUpdateCheckDropsAWingetPackageThatIsNotInstalled(t *testing.T) {
+	opts := updOpts(t)
+	opts.OS = "windows"
+	fakeTool(t, opts, "node.exe", "v24.6.0")
+	fakeWinget(t, opts, wingetFixture("Go|GoLang.Go|1.27.0|"))
+
+	m := NewModel(rows(), config.Default(), opts)
+	m.opts.Fetcher = sources.NewFetcher("", time.Minute, func(url string) ([]byte, error) {
+		if strings.Contains(url, "nodejs.org") {
+			return []byte(`[{"version":"v24.22.0"}]`), nil
+		}
+		return nil, errors.New("offline")
+	})
+
+	out := strings.Join(pressUpdate(t, m).Output, "\n")
+	if strings.Contains(out, "update: winget") {
+		t.Fatalf("offered winget for a package it does not have:\n%s", out)
+	}
+	if !strings.Contains(out, "no package manager on this machine owns node") {
+		t.Fatalf("did not say nothing owns the tool:\n%s", out)
+	}
+	if strings.Contains(out, "second copy") {
+		// the reason must explain the consequence, not just name it
+	} else {
+		t.Fatalf("did not explain what upgrading would do:\n%s", out)
+	}
+}

@@ -157,10 +157,11 @@ var packages = map[string]map[string]string{
 		"apt": "ghc", "dnf": "ghc", "pacman": "ghc", "apk": "ghc",
 		"winget": "haskell.haskell", "scoop": "ghc", "choco": "ghc", "brew": "ghc", "nix": "ghc",
 	},
-	"tsc": {
-		"npm": "typescript", "winget": "OpenJS.NodeJS.LTS", "scoop": "nodejs", "choco": "nodejs-lts",
-		"brew": "node",
-	},
+	// No winget, scoop, choco or brew entry, deliberately: none of them package
+	// TypeScript. The ids that used to sit here named node, so the install menu
+	// offered a node package for a tool it does not provide, and the update
+	// check offered `winget upgrade --id OpenJS.NodeJS.LTS` for tsc.
+	"tsc": {"npm": "typescript"},
 	"msvc": {
 		"winget": "Microsoft.VisualStudio.2022.BuildTools",
 		"choco":  "visualstudio2022buildtools", "scoop": "vsbuildtools",

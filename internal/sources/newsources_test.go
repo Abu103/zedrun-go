@@ -193,11 +193,11 @@ func TestLuaAtom(t *testing.T) {
 // A provider that returns nothing usable must say so, not invent a version.
 func TestNewProvidersReportErrorsHonestly(t *testing.T) {
 	fx := fixtures{
-		"https://ftp.gnu.org/gnu/bash/": `<html><body><pre><a href="bash-5.2.tar.gz.sig">x</a></pre></body></html>`,
-		"https://www.php.net/releases/index.php?json": `{}`,
-		"https://fastapi.metacpan.org/v1/release/perl": `{"archive": ""}`,
-		"https://sqlite.org/changes.html": `<html><body>nothing</body></html>`,
-		"https://cran.r-project.org/src/base/": `<a href="R-0/">R-0/</a>`,
+		"https://ftp.gnu.org/gnu/bash/":                         `<html><body><pre><a href="bash-5.2.tar.gz.sig">x</a></pre></body></html>`,
+		"https://www.php.net/releases/index.php?json":           `{}`,
+		"https://fastapi.metacpan.org/v1/release/perl":          `{"archive": ""}`,
+		"https://sqlite.org/changes.html":                       `<html><body>nothing</body></html>`,
+		"https://cran.r-project.org/src/base/":                  `<a href="R-0/">R-0/</a>`,
 		"https://gitlab.haskell.org/ghc/ghc/-/tags?format=atom": `<feed></feed>`,
 	}
 	cases := []Product{
