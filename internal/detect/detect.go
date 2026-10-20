@@ -97,12 +97,12 @@ func NewProbeCache(path string) *ProbeCache {
 }
 
 // Get returns a cached result when the executable is unchanged.
-func (c *ProbeCache) Get(path string, mtime, size int64) (Install, bool) {
+func (c *ProbeCache) Get(path string, args []string, mtime, size int64) (Install, bool) {
 	if c == nil {
 		return Install{}, false
 	}
 	c.mu.Lock()
-	e, ok := c.m[path]
+	e, ok := c.m[probeKey(path, args)]
 	c.mu.Unlock()
 	if !ok || e.Mtime != mtime || e.Size != size {
 		return Install{}, false
@@ -111,7 +111,7 @@ func (c *ProbeCache) Get(path string, mtime, size int64) (Install, bool) {
 }
 
 // Put records a probe result.
-func (c *ProbeCache) Put(inst Install, mtime, size int64) {
+func (c *ProbeCache) Put(inst Install, args []string, mtime, size int64) {
 	if c == nil {
 		return
 	}
@@ -120,7 +120,20 @@ func (c *ProbeCache) Put(inst Install, mtime, size int64) {
 	if c.m == nil {
 		c.m = map[string]cacheEntry{}
 	}
-	c.m[inst.Path] = cacheEntry{Mtime: mtime, Size: size, Version: inst.Version, Origin: inst.Origin, Note: inst.Note, OK: inst.OK}
+	c.m[probeKey(inst.Path, args)] = cacheEntry{Mtime: mtime, Size: size, Version: inst.Version, Origin: inst.Origin, Note: inst.Note, OK: inst.OK}
+}
+
+// probeKey identifies a cached verdict. It includes the version arguments
+// because the same executable answers differently depending on them: apt-get
+// with no arguments exits 1 and looks unusable, while apt-get --version exits 0.
+// Keying on the path alone meant that changing a tool's VersionArgs was ignored
+// forever on every machine that had already probed it, because the file's mtime
+// and size had not changed.
+func probeKey(path string, args []string) string {
+	if len(args) == 0 {
+		return path
+	}
+	return path + "\x00" + strings.Join(args, "\x00")
 }
 
 // Save writes the cache to disk.
@@ -205,7 +218,7 @@ func toolDirs(t catalog.Tool, env map[string]string, osOverride string) []string
 // version out of the output. A nonzero exit or a timeout means unusable.
 func Probe(t catalog.Tool, path string, cache *ProbeCache, timeout time.Duration) Install {
 	mtime, size := statKey(path)
-	if inst, ok := cache.Get(path, mtime, size); ok {
+	if inst, ok := cache.Get(path, t.VersionArgs, mtime, size); ok {
 		inst.Tool = t.ID
 		return inst
 	}
@@ -233,7 +246,7 @@ func Probe(t catalog.Tool, path string, cache *ProbeCache, timeout time.Duration
 		}
 	}
 	if !timedOut {
-		cache.Put(inst, mtime, size)
+		cache.Put(inst, t.VersionArgs, mtime, size)
 	}
 	return inst
 }

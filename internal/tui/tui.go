@@ -5,11 +5,13 @@
 package tui
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"os/exec"
 	"sort"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -22,6 +24,7 @@ import (
 	"github.com/zedrun/zedrun-go/internal/installer"
 	"github.com/zedrun/zedrun-go/internal/planner"
 	"github.com/zedrun/zedrun-go/internal/platform"
+	"github.com/zedrun/zedrun-go/internal/provision"
 	"github.com/zedrun/zedrun-go/internal/sources"
 	"github.com/zedrun/zedrun-go/internal/versions"
 )
@@ -66,6 +69,9 @@ type Model struct {
 	// prompt is non-nil while the `r` path prompt is open.
 	prompt *pathPrompt
 
+	// getMenu is non-nil while the `g` install overlay is open.
+	getMenu *getMenu
+
 	cfg  config.Config
 	opts Options
 	w, h int
@@ -95,6 +101,20 @@ type choice struct {
 type pathPrompt struct {
 	label string
 	value []rune
+}
+
+// getChoice is one installable route offered in the overlay.
+type getChoice struct {
+	lang   string // language that is missing a toolchain
+	tool   string // catalog tool id the route installs
+	method provision.Method
+}
+
+// getMenu is the install overlay: every route that would give a language a
+// toolchain, best first, ready to run.
+type getMenu struct {
+	choices []getChoice
+	cursor  int
 }
 
 // handle applies one key and reports whether the prompt was submitted or
@@ -183,6 +203,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.Scroll = m.bodyLen()
 		m.clamp()
 		return m, nil
+	case getDoneMsg:
+		m.append(msg.text)
+		m.Scroll = m.bodyLen()
+		m.clamp()
+		return m, nil
 	case doctorMsg:
 		m.append(msg.text)
 		m.Scroll = m.bodyLen()
@@ -208,6 +233,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.picker != nil {
 			return m.updatePicker(msg)
 		}
+		if m.getMenu != nil {
+			return m.updateGetMenu(msg)
+		}
 		wasConfirm := m.confirmInstall
 		m.confirmInstall = false
 		switch msg.String() {
@@ -232,7 +260,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.Scroll -= m.window() / 2
 		case "ctrl+d":
 			m.Scroll += m.window() / 2
-		case "home", "g":
+		case "home":
 			m.Scroll = 0
 		case "end", "G":
 			m.Scroll = m.bodyLen()
@@ -296,6 +324,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "t":
 			m.act("pick")
 			m.Scroll = m.bodyLen()
+		case "g":
+			m.LastAction = "get"
+			m.openGetMenu()
 		case "i":
 			m.LastAction = "install"
 			if wasConfirm {
@@ -403,6 +434,9 @@ func (m Model) View() string {
 	if m.picker != nil {
 		return m.pickerView()
 	}
+	if m.getMenu != nil {
+		return m.getViewMenu()
+	}
 	title := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("212"))
 	dim := lipgloss.NewStyle().Faint(true)
 
@@ -439,9 +473,14 @@ func (m Model) View() string {
 	return b.String()
 }
 
-// footer is the key hint. It fits 80 columns with room to spare, because a
+// footer is the key hint. It is kept under 80 columns on purpose: the hint is
+// rendered with fit(), which truncates, and a truncated hint is a key the user
+// never learns. `c clear` is the one key left out — clearing the output pane is
+// the least important action here, and the rest do not fit beside it.
+//
+// It fits 80 columns with room to spare, because a
 // truncated hint is a hint for the keys nobody can find.
-const footer = "r run · d doctor · u updates · t pick · i install · m mouse · c clear · q quit"
+const footer = "r run · d doctor · u updates · t pick · i zed · g get · m mouse · q quit"
 
 // Run starts the dashboard. It returns the exit code to use. The toolchain scan
 // runs inside the program, so the first frame is on screen immediately.
@@ -721,6 +760,209 @@ func (m Model) pickerView() string {
 		b.WriteString("\n")
 	}
 	b.WriteString(m.fit(dim.Render("↑/↓ select · enter pin · esc cancel")))
+	return b.String()
+}
+
+// ---- install overlay ------------------------------------------------------
+
+// openGetMenu builds the install overlay from the languages that have nothing
+// usable, and opens it. A language that already resolves is skipped, so the
+// list is exactly what the user would otherwise have to install by hand.
+func (m *Model) openGetMenu() {
+	choices := m.getChoices()
+	if len(choices) == 0 {
+		m.append("get: every language has a usable toolchain")
+		m.Scroll = m.bodyLen()
+		m.clamp()
+		return
+	}
+	m.getMenu = &getMenu{choices: choices}
+	m.clamp()
+}
+
+// getChoices lists one runnable route per language that has no toolchain, in
+// catalog order. Only runnable routes are offered: an overlay whose enter key
+// does nothing is worse than no overlay.
+func (m Model) getChoices() []getChoice {
+	cache := m.opts.Cache
+	if cache == nil {
+		cache = detect.NewProbeCache("")
+	}
+	env, osName := m.env(), m.osName()
+	detected := provision.Detected(m.cfg, cache, env, osName)
+
+	keys := make([]string, 0, len(catalog.Languages))
+	for k := range catalog.Languages {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	var out []getChoice
+	for _, lang := range keys {
+		if _, err := planner.Resolve(lang, "", m.cfg, cache, "", env, osName, nil); err == nil {
+			continue
+		}
+		for _, r := range catalog.Languages[lang].Runners {
+			for _, id := range r.Tool {
+				ms := provision.Available(id, osName, detected, false)
+				ms = provision.Order(ms, provision.OwnerFor(""))
+				for _, method := range ms {
+					if method.Runnable() {
+						out = append(out, getChoice{lang: lang, tool: id, method: method})
+						break
+					}
+				}
+				break
+			}
+			break
+		}
+	}
+	return out
+}
+
+// updateGetMenu handles keys while the install overlay is open. The overlay
+// takes every key: a stray `q` closing the whole program from inside a menu is
+// how a user loses their scrollback.
+func (m Model) updateGetMenu(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	g := m.getMenu
+	switch msg.String() {
+	case "esc", "q", "ctrl+c":
+		m.getMenu = nil
+	case "up", "k":
+		if g.cursor > 0 {
+			g.cursor--
+		}
+	case "down", "j":
+		if g.cursor < len(g.choices)-1 {
+			g.cursor++
+		}
+	case "enter":
+		if len(g.choices) == 0 {
+			m.getMenu = nil
+			return m, nil
+		}
+		c := g.choices[g.cursor]
+		m.getMenu = nil
+		m.append("get: " + c.lang + " via " + c.method.Manager)
+		m.append("get: " + c.method.Command())
+		m.Scroll = m.bodyLen()
+		m.clamp()
+		// The install goes out as a command: a package manager can take
+		// minutes, and the dashboard must stay responsive while it runs.
+		return m, m.installCmd(c)
+	}
+	return m, nil
+}
+
+// installCmd runs one route in the background and reports back as a message.
+// Running it as a command rather than a bare goroutine is what makes the
+// outcome testable: the test can call the command and feed the message back.
+func (m Model) installCmd(c getChoice) tea.Cmd {
+	env, osName := m.env(), m.osName()
+	method := c.method
+	tool := c.tool
+	return func() tea.Msg {
+		argv, ok, note := provision.Elevate(method, osName, os.Geteuid() == 0, env)
+		if !ok {
+			return getDoneMsg{"get: " + note}
+		}
+		method.Argv = argv
+		// The installer's own output is the interesting half of the result:
+		// a manager that says nothing is indistinguishable from one that
+		// failed silently. It is captured rather than streamed, because the
+		// overlay owns the screen while the install runs.
+		var log cappedBuffer
+		code := provision.Run(method, provision.RunOptions{
+			Elevate: argv[0] == "sudo",
+			Env:     env,
+			Stdout:  &log,
+			Stderr:  &log,
+			Timeout: 10 * time.Minute,
+		})
+		if log.Len() > 0 {
+			return getDoneMsg{"get:\n" + log.String()}
+		}
+		if code == 0 {
+			return getDoneMsg{"get: " + tool + " done — `zedrun-go which " + tool + "` will confirm it"}
+		}
+		return getDoneMsg{fmt.Sprintf("get: %s exited %d", tool, code)}
+	}
+}
+
+// getDoneMsg carries the outcome of an install back into the model.
+type getDoneMsg struct{ text string }
+
+// cappedBuffer is a bytes.Buffer that keeps only the last cap bytes. An
+// installer's progress lines are not worth a scrollback pane; its final
+// summary is.
+type cappedBuffer struct {
+	bytes.Buffer
+	cap int
+}
+
+func (b *cappedBuffer) Write(p []byte) (int, error) {
+	if b.cap <= 0 {
+		b.cap = 4000
+	}
+	n, err := b.Buffer.Write(p)
+	if b.Buffer.Len() > b.cap {
+		// Drop whole lines from the front so the log does not start mid-word.
+		s := b.Buffer.String()
+		cut := b.Buffer.Len() - b.cap
+		if i := strings.IndexByte(s[cut:], '\n'); i >= 0 {
+			cut += i + 1
+		}
+		b.Buffer.Reset()
+		b.Buffer.WriteString(s[cut:])
+	}
+	return n, err
+}
+
+// getViewMenu renders the overlay: one row per route, the cursor highlighted.
+func (m Model) getViewMenu() string {
+	g := m.getMenu
+	sel := lipgloss.NewStyle().Reverse(true)
+	dim := lipgloss.NewStyle().Faint(true)
+
+	var lines []string
+	lines = append(lines, m.fit(lipgloss.NewStyle().Bold(true).Render("get a toolchain")), "")
+	// How much is actually missing, so the list has a headline rather than
+	// looking like a menu of things the user already has.
+	noun := "languages"
+	if len(g.choices) == 1 {
+		noun = "language"
+	}
+	lines = append(lines, m.fit(dim.Render(fmt.Sprintf("%d %s have nothing usable — enter installs the highlighted route", len(g.choices), noun))), "")
+	for i, c := range g.choices {
+		line := m.fit(fmt.Sprintf("  %-10s %-7s %s", c.lang, c.method.Manager, c.method.Command()))
+		if i == g.cursor {
+			line = sel.Render(line)
+		}
+		lines = append(lines, line)
+	}
+
+	win := m.h - 1
+	if win < 1 {
+		win = 1
+	}
+	start := 0
+	if cur := g.cursor + 2; cur >= win {
+		start = cur - win + 1
+	}
+	end := start + win
+	if end > len(lines) {
+		end = len(lines)
+	}
+	var b strings.Builder
+	n := 0
+	for _, l := range lines[start:end] {
+		b.WriteString(l + "\n")
+		n++
+	}
+	for ; n < win; n++ {
+		b.WriteString("\n")
+	}
+	b.WriteString(m.fit(dim.Render("↑/↓ select · enter install · esc cancel")))
 	return b.String()
 }
 

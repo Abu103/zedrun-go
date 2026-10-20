@@ -125,7 +125,7 @@ func TestLanguageTableReflectsRows(t *testing.T) {
 func TestKeyFooterListsKeys(t *testing.T) {
 	m := NewModel(rows(), config.Default(), Options{})
 	v := m.View()
-	for _, want := range []string{"run", "doctor", "updates", "pick", "install", "quit"} {
+	for _, want := range []string{"run", "doctor", "updates", "pick", "get", "quit"} {
 		if !strings.Contains(strings.ToLower(v), want) {
 			t.Errorf("View footer missing %q:\n%s", want, v)
 		}

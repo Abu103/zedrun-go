@@ -22,6 +22,7 @@ import (
 	"github.com/zedrun/zedrun-go/internal/installer"
 	"github.com/zedrun/zedrun-go/internal/planner"
 	"github.com/zedrun/zedrun-go/internal/platform"
+	"github.com/zedrun/zedrun-go/internal/provision"
 	"github.com/zedrun/zedrun-go/internal/sources"
 	"github.com/zedrun/zedrun-go/internal/tui"
 	"github.com/zedrun/zedrun-go/internal/version"
@@ -40,7 +41,7 @@ type Options struct {
 
 var commandNames = []string{
 	"run", "which", "doctor", "outdated", "use", "pick",
-	"install", "uninstall", "languages", "clean",
+	"install", "uninstall", "languages", "clean", "get",
 }
 
 const usage = `zedrun-go — Code Runner for Zed
@@ -57,6 +58,7 @@ commands:
   pick       choose a toolchain for a language
   install    install into Zed               [--dry-run] [--zed-dir D]
   uninstall  remove from Zed                [--purge]
+  get        how to install a toolchain     get [TOOL] [--all] [--run] [--using M] [--yes]
   languages  list supported languages
   clean      clear the zedrun-go cache
 
@@ -128,6 +130,8 @@ func MainWith(args []string, out, errOut io.Writer, opts Options) int {
 		return cmdLanguages(args[1:], out, errOut)
 	case "clean":
 		return cmdClean(args[1:], out, errOut, opts, env, osName)
+	case "get":
+		return cmdGet(args[1:], out, errOut, opts, env, osName)
 	}
 	if looksLikePath(args[0]) {
 		return cmdRun(args, out, errOut, opts, env, osName)
@@ -863,3 +867,241 @@ func environ() map[string]string {
 	}
 	return out
 }
+
+// cmdGet lists every way to obtain a toolchain on this machine and, with
+// --run and --yes, executes one. Listing is the default and running needs
+// --yes: starting a third-party installer without being asked is not something
+// this tool does. --update does the same for a tool that is already installed.
+func cmdGet(args []string, out, errOut io.Writer, opts Options, env map[string]string, osName string) int {
+	var (
+		tool    string
+		all     bool
+		doRun   bool
+		update  bool
+		yes     bool
+		using   string
+		timeout time.Duration
+	)
+	for i := 0; i < len(args); i++ {
+		switch a := args[i]; a {
+		case "--all":
+			all = true
+		case "--run":
+			doRun = true
+		case "--update":
+			update = true
+		case "--yes", "-y":
+			yes = true
+		case "--using":
+			if i+1 >= len(args) {
+				fmt.Fprintln(errOut, "--using needs a manager name")
+				return 2
+			}
+			i++
+			using = args[i]
+		case "--timeout":
+			if i+1 >= len(args) {
+				fmt.Fprintln(errOut, "--timeout needs a value, like --timeout 2m")
+				return 2
+			}
+			i++
+			d, err := time.ParseDuration(args[i])
+			if err != nil || d <= 0 {
+				fmt.Fprintf(errOut, "bad --timeout %q\n", args[i])
+				return 2
+			}
+			timeout = d
+		default:
+			if strings.HasPrefix(a, "-") {
+				fmt.Fprintf(errOut, "unknown flag %s\n", a)
+				return 2
+			}
+			if tool != "" {
+				fmt.Fprintf(errOut, "get takes one tool, got %q and %q\n", tool, a)
+				return 2
+			}
+			tool = a
+		}
+	}
+
+	cfg, warns := loadConfig(opts, env, osName)
+	for _, w := range warns {
+		fmt.Fprintf(errOut, "warning: %s\n", w)
+	}
+	cache := cacheFor(opts, env, osName)
+	detected := provision.Detected(cfg, cache, env, osName)
+	_ = cache.Save()
+
+	if tool == "" {
+		return getMissing(out, errOut, cfg, cache, detected, env, osName, all)
+	}
+	if _, ok := catalog.Tools[tool]; !ok {
+		fmt.Fprintf(errOut, "unknown tool %q\n", tool)
+		return 2
+	}
+
+	ms := provision.Available(tool, osName, detected, all)
+	ms = provision.Order(ms, provision.OwnerFor(installOrigin(tool, cfg, cache, env, osName)))
+
+	if update {
+		return getUpdate(tool, ms, using, out, errOut, opts, env, osName, timeout)
+	}
+
+	if !doRun {
+		provision.Render(out, tool, ms)
+		return 0
+	}
+
+	pick, ok := pickMethod(ms, using)
+	if !ok {
+		provision.Render(out, tool, ms)
+		if using != "" {
+			fmt.Fprintf(errOut, "\nno usable %s route for %s on %s\n", using, tool, osName)
+		} else {
+			fmt.Fprintf(errOut, "\nnothing runnable — pass --using <manager> to choose one\n")
+		}
+		return 1
+	}
+	if !yes {
+		fmt.Fprintf(out, "about to run:\n  %s\n\nre-run with --yes to confirm\n", pick.Command())
+		return 0
+	}
+
+	return execMethod(pick, "installing", out, errOut, opts, env, osName, timeout)
+}
+
+// execMethod runs a method, printing the exact command first and reporting the
+// outcome in the tool's own exit code. Elevation is decided by elevateFor, so
+// a method that cannot be elevated is explained rather than attempted.
+func execMethod(m provision.Method, verb string, out, errOut io.Writer, opts Options, env map[string]string, osName string, timeout time.Duration) int {
+	root := isRoot()
+	argv, ok, note := elevateFor(m, osName, root, env)
+	if !ok {
+		fmt.Fprintln(errOut, note)
+		return 1
+	}
+	elevated := argv[0] == "sudo"
+	fmt.Fprintf(out, "%s %s with %s\n", verb, m.Manager, m.Tool)
+	if elevated {
+		fmt.Fprintf(out, "elevated with sudo (passwordless)\n")
+	}
+	code := provision.Run(m, provision.RunOptions{
+		Elevate: elevated,
+		Env:     env,
+		Stdout:  out,
+		Stderr:  errOut,
+		IsRoot:  root,
+		OS:      osName,
+		Timeout: timeout,
+	})
+	if code == 0 {
+		fmt.Fprintf(out, "\n%s done. `zedrun-go which %s` will confirm it.\n", m.Tool, m.Tool)
+	}
+	return code
+}
+
+// getUpdate updates a tool that is already installed, through the manager that
+// owns it. A tool with no manager is reported rather than silently re-installed.
+func getUpdate(tool string, ms []provision.Method, using string, out, errOut io.Writer, opts Options, env map[string]string, osName string, timeout time.Duration) int {
+	var candidates []provision.Method
+	for _, m := range ms {
+		if using != "" && m.Manager != using {
+			continue
+		}
+		if argv, ok := m.Update(); ok {
+			candidates = append(candidates, provision.Method{
+				Tool: tool, Manager: m.Manager, Package: m.Package,
+				Argv: argv, Elevated: m.Elevated, Present: m.Present,
+			})
+		}
+	}
+	if len(candidates) == 0 {
+		if using != "" {
+			fmt.Fprintf(errOut, "%s has no %s update route on %s\n", tool, using, osName)
+		} else {
+			fmt.Fprintf(errOut, "%s has no update route on %s — it is not managed by a known package manager\n", tool, osName)
+		}
+		return 1
+	}
+	pick := candidates[0]
+	for _, m := range candidates {
+		if m.Manager == using {
+			pick = m
+			break
+		}
+	}
+	fmt.Fprintf(out, "%s: %s\n", pick.Manager, pick.Command())
+	code := execMethod(pick, "updating", out, errOut, opts, env, osName, timeout)
+	if code == 0 {
+		fmt.Fprintf(out, "\n%s is up to date with its manager.\n", tool)
+	}
+	return code
+}
+
+// elevateFor is the CLI's elevation decision, delegated to provision so the
+// TUI and the command line cannot drift apart on when sudo is used.
+func elevateFor(m provision.Method, osName string, isRoot bool, env map[string]string) ([]string, bool, string) {
+	return provision.Elevate(m, osName, isRoot, env)
+}
+
+// pickMethod chooses what --run would execute: the named manager if one was
+// given, otherwise the first method that can actually be run.
+func pickMethod(ms []provision.Method, using string) (provision.Method, bool) {
+	for _, m := range ms {
+		if !m.Runnable() {
+			continue
+		}
+		if using == "" || m.Manager == using {
+			return m, true
+		}
+	}
+	return provision.Method{}, false
+}
+
+// installOrigin reports where the first usable install of a tool came from, so
+// the manager that already owns it can be preferred.
+func installOrigin(tool string, cfg config.Config, cache *detect.ProbeCache, env map[string]string, osName string) string {
+	for _, in := range detect.FindInstalls(catalog.GetTool(tool), cfg, cache, false, env, osName) {
+		if in.OK {
+			return in.Origin
+		}
+	}
+	return ""
+}
+
+// getMissing is the new-device flow: for every language with no usable
+// toolchain, list the ways to get one.
+func getMissing(out, errOut io.Writer, cfg config.Config, cache *detect.ProbeCache, detected map[string]string, env map[string]string, osName string, all bool) int {
+	keys := make([]string, 0, len(catalog.Languages))
+	for k := range catalog.Languages {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	missing := 0
+	for _, lang := range keys {
+		if _, err := planner.Resolve(lang, "", cfg, cache, "", env, osName, nil); err == nil {
+			continue
+		}
+		missing++
+		fmt.Fprintf(out, "\n%s\n", lang)
+		for _, r := range catalog.Languages[lang].Runners {
+			for _, id := range r.Tool {
+				provision.Render(out, id, provision.Available(id, osName, detected, all))
+				break
+			}
+			break
+		}
+	}
+	if missing == 0 {
+		fmt.Fprintln(out, "every language has a usable toolchain")
+		return 0
+	}
+	fmt.Fprintf(out, "\n%d language(s) have nothing usable. `zedrun-go get <tool> --run --yes` installs one.\n", missing)
+	return 0
+}
+
+// isRoot reports whether this process already has root, in which case an
+// elevated method needs no sudo. On Windows Geteuid returns -1, so an elevated
+// method there is explained rather than attempted.
+func isRoot() bool { return os.Geteuid() == 0 }

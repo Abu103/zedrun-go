@@ -135,11 +135,12 @@ Then open the dashboard — `zedrun-go` with no arguments:
 |-----|--------|
 | `↑` `↓` / `k` `j` | move between languages |
 | `PgUp` `PgDn` / `Ctrl+U` `Ctrl+D` | scroll the view |
-| `Home` `End` / `g` `G` | jump to the top / bottom |
+| `Home` `End` | jump to the top / bottom |
 | `r` | run a file — see below for where the path comes from |
 | `d` | doctor |
 | `u` | check installed versions against the latest (`p` picks the channel) |
 | `t` | pick a toolchain for the highlighted language |
+| `g` | **get a toolchain** — the install menu, see below |
 | `i` | preview the Zed install; press `i` again to apply |
 | `m` | turn mouse capture on (the wheel scrolls) or off |
 | `c` | clear the output pane |
@@ -160,6 +161,40 @@ may want to copy is the point of this dashboard. So it starts off, and the
 wheel is handled by your terminal as arrow keys — which move the language
 cursor and scroll to follow it. Press `m` when you want the wheel to scroll the
 pane directly; press it again to get text selection back.
+
+### The `g` key installs a toolchain
+
+Every language with nothing usable is listed with a route that would give it a
+toolchain. `↑`/`↓` moves, `Enter` runs the highlighted route, `Esc` closes the
+menu.
+
+```console
+get a toolchain
+
+16 languages have nothing usable — enter installs the highlighted route
+
+  csharp     apt     apt-get install -y dotnet-sdk-8.0
+  dart       snap    snap install dart
+  elixir     apt     apt-get install -y elixir
+  ...
+```
+
+The same engine drives the command line, which can also update what is already
+installed:
+
+```console
+$ zedrun-go get                 # what is missing here
+$ zedrun-go get zig             # every way to get zig, best first
+$ zedrun-go get zig --all       # including managers that are not installed
+$ zedrun-go get python --run --yes
+$ zedrun-go get python --update # upgrade through the manager that owns it
+```
+
+`--run` alone only prints what it would do; `--yes` is the confirmation. A route
+that needs root is run through `sudo` only when sudo works without a password —
+otherwise the exact command is printed for you to run yourself, because a
+non-interactive shell cannot type a password. `--timeout` stops a manager that
+hangs on a network that is not there.
 
 ### Where `r` gets its file
 
@@ -220,6 +255,7 @@ Run `zedrun-go <command> --help` for any of these.
 | `outdated` | installed vs latest upstream |
 | `use` | set a language preference |
 | `pick` | list the toolchains that can run a language |
+| `get` | how to install a toolchain — and installs one with `--run --yes` |
 | `install` | add the Zed tasks and keybindings |
 | `uninstall` | remove them |
 | `languages` | list supported languages and extensions |
@@ -256,6 +292,35 @@ zedrun-go run main.c --dry-run          # see the compiler command first
 | `--json` | machine-readable output |
 | `--all` | also list unusable installs and every problem |
 | `--sources` | check that each version source is reachable (network) |
+
+### `get`
+
+```
+zedrun-go get [TOOL] [--all] [--run] [--update] [--using MANAGER]
+                [--timeout DUR] [--yes]
+```
+
+| flag | meaning |
+|------|---------|
+| *(no TOOL)* | every language with nothing usable, and how to get a toolchain |
+| `TOOL` | every way to get that tool on this machine, best first |
+| `--all` | also show managers that are not installed |
+| `--run` | execute the route (needs `--yes`) |
+| `--update` | update an installed tool through the manager that owns it |
+| `--using M` | use this manager's route instead of the best one |
+| `--timeout D` | stop the installer after `D`; `0` waits forever |
+| `--yes`, `-y` | confirm the install |
+
+```sh
+zedrun-go get                  # what is missing on this machine
+zedrun-go get zig              # every way to get zig
+zedrun-go get python --update  # upgrade python through its own manager
+```
+
+The distro's own package manager is offered first, because that is the route
+that keeps the tool updated. Language-specific managers (`rustup`, `npm`,
+`pip`, `cargo`) come after it, and a direct download is always last — it is the
+route that leaves the tool unmanaged.
 
 ### `outdated`
 

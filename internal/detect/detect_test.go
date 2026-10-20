@@ -173,7 +173,7 @@ func TestCorruptProbeCacheIgnored(t *testing.T) {
 		t.Fatal(err)
 	}
 	cache := NewProbeCache(cachePath)
-	if _, ok := cache.Get("/nonexistent", 1, 1); ok {
+	if _, ok := cache.Get("/nonexistent", nil, 1, 1); ok {
 		t.Fatal("corrupt cache produced a hit")
 	}
 }
@@ -219,5 +219,57 @@ func TestUnusableInstallStillReportedWithValidateAll(t *testing.T) {
 	}
 	if got[0].Note == "" {
 		t.Fatal("unusable install has no note")
+	}
+}
+
+// The probe cache used to key on the path alone, so a verdict reached with one
+// set of arguments was served for every other set. That silently made apt-get
+// look unusable — apt-get with no arguments exits 1 — and it meant that changing
+// a tool's VersionArgs was ignored forever on any machine that had already
+// probed it, because the file's mtime and size had not changed.
+func TestProbeCacheSeparatesArgumentSets(t *testing.T) {
+	dir := t.TempDir()
+	exe := filepath.Join(dir, "mgr")
+	script := "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'mgr 1.2.3'; exit 0; fi\nexit 1\n"
+	if err := os.WriteFile(exe, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	noArgs := catalog.Tool{ID: "mgr", Names: []string{"mgr"}}
+	withVersion := catalog.Tool{ID: "mgr", Names: []string{"mgr"}, VersionArgs: []string{"--version"}}
+
+	// A cached failure must not be reused for a different argument set.
+	c := NewProbeCache("")
+	if Probe(noArgs, exe, c, 5*time.Second).OK {
+		t.Fatal("the no-argument probe should have failed")
+	}
+	got := Probe(withVersion, exe, c, 5*time.Second)
+	if !got.OK {
+		t.Error("a cached failure was reused for a different argument set")
+	}
+	if got.Version != "1.2.3" {
+		t.Errorf("version = %q, want 1.2.3", got.Version)
+	}
+
+	// And the reverse order must hold as well.
+	c2 := NewProbeCache("")
+	if !Probe(withVersion, exe, c2, 5*time.Second).OK {
+		t.Fatal("the version probe should have succeeded")
+	}
+	if Probe(noArgs, exe, c2, 5*time.Second).OK {
+		t.Error("a cached success was reused for a different argument set")
+	}
+}
+
+// Two different tools that happen to resolve to the same executable must not
+// share a verdict either, which the argument set is what distinguishes.
+func TestProbeKeyIncludesArguments(t *testing.T) {
+	if probeKey("/bin/x", nil) != "/bin/x" {
+		t.Error("an empty argument set should key on the path alone")
+	}
+	if probeKey("/bin/x", []string{"--version"}) == probeKey("/bin/x", []string{"-v"}) {
+		t.Error("different argument sets produced the same key")
+	}
+	if probeKey("/bin/x", []string{"--version"}) == probeKey("/bin/x", nil) {
+		t.Error("an argument set collided with the empty one")
 	}
 }

@@ -114,6 +114,35 @@ example:
 
 List every supported language and its file extensions.
 `,
+	"get": `usage: zedrun-go get [TOOL] [flags]
+
+List every way to obtain a toolchain on this machine, best first. Nothing is
+installed unless --run and --yes are both given, and the exact command is
+always printed first. With no TOOL, list the languages that have nothing
+usable yet — the new-machine case. --update does the same for a tool that is
+already installed, through the manager that owns it.
+
+flags:
+  --all            include managers that are not installed, so you can see
+                   the whole menu and install the manager first
+  --run            execute the best route (needs --yes)
+  --update         update an installed tool instead of installing a missing one
+  --using MANAGER  run this manager's route instead of the best one
+  --timeout DUR    stop the installer after DUR, e.g. --timeout 2m
+  --yes, -y        confirm the install
+
+examples:
+  zedrun-go get                  what is missing on this machine
+  zedrun-go get zig              every way to get zig
+  zedrun-go get zig --all        including managers that are not installed
+  zedrun-go get python --run --yes
+  zedrun-go get python --update  upgrade python through its own manager
+
+Nothing is ever elevated without being asked. A route that needs root is run
+through sudo only when sudo works without a password; otherwise the exact
+command is printed for you to run yourself. The TUI does the same thing with
+the g key.
+`,
 	"clean": `usage: zedrun-go clean
 
 Delete the zedrun-go cache: probe results and build artifacts. The next
