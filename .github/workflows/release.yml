@@ -3,6 +3,7 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -55,6 +56,15 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+      - name: Checksums
+        run: |
+          cd dist
+          sha256sum zedrun-go-* > checksums.txt
+          cat checksums.txt
+      - name: Smoke-test the linux binary
+        run: |
+          chmod +x dist/zedrun-go-linux-amd64
+          ./dist/zedrun-go-linux-amd64 --version
       - uses: softprops/action-gh-release@v2
         with:
           files: dist/*
