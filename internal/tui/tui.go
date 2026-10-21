@@ -83,6 +83,11 @@ type Model struct {
 	// overlay when it finishes, rather than leaving the user to press U again.
 	wantUpd bool
 
+	// checked and nOutdated feed the status bar. They are set when an update
+	// check lands, never recomputed in View: the check is a network pass.
+	checked   bool
+	nOutdated int
+
 	cfg  config.Config
 	opts Options
 	w, h int
@@ -91,7 +96,7 @@ type Model struct {
 // maxOutput caps the output pane; older lines are dropped first.
 const maxOutput = 2000
 
-// headerRows is the fixed header: title, subtitle, blank line.
+// headerRows is the fixed header: title, subtitle, status bar.
 const headerRows = 3
 
 // picker lists the installs of one language and lets the user pin one.
@@ -198,8 +203,9 @@ type runDoneMsg struct{ err error }
 // outdated tools too: the command that fills it runs against a copy of the
 // model, so anything that copy collected has to travel in the message.
 type updatesMsg struct {
-	lines []string
-	upd   []updChoice
+	lines    []string
+	upd      []updChoice
+	outdated int // every outdated tool, including ones with no update route
 }
 
 // doctorMsg carries a finished diagnostics run into the model.
@@ -242,6 +248,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.updatesRunning = false
 		m.appendLines(msg.lines)
 		m.upd = msg.upd
+		m.nOutdated = msg.outdated
+		// Without a version source nothing was compared, so "0 outdated"
+		// would be a claim nobody checked.
+		m.checked = m.opts.Fetcher != nil
 		m.Scroll = m.bodyLen()
 		m.clamp()
 		if m.wantUpd {
@@ -250,6 +260,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case updDoneMsg:
+		// What was outdated has just changed; the old list would offer the
+		// same update twice and the status bar would keep counting it.
+		m.upd, m.nOutdated, m.checked = nil, 0, false
 		m.append(msg.text)
 		m.Scroll = m.bodyLen()
 		m.clamp()
@@ -265,7 +278,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.clamp()
 		return m, nil
 	case tea.MouseMsg:
-		if m.picker != nil || m.prompt != nil {
+		if m.picker != nil || m.prompt != nil || m.getMenu != nil || m.updMenu != nil {
 			return m, nil
 		}
 		switch msg.Button {
@@ -520,9 +533,6 @@ func (m Model) View() string {
 	if m.updMenu != nil {
 		return m.getViewUpdMenu()
 	}
-	title := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("212"))
-	dim := lipgloss.NewStyle().Faint(true)
-
 	body := m.body()
 	win := m.window()
 	start := m.Scroll
@@ -533,17 +543,31 @@ func (m Model) View() string {
 	if end > len(body) {
 		end = len(body)
 	}
-	visible := body[start:end]
-
-	var b strings.Builder
-	b.WriteString(m.fit(title.Render("zedrun-go — Code Runner for Zed")))
-	b.WriteString("\n")
 	sub := fmt.Sprintf("%s · %d languages · %s channel (p)", m.osName(), len(m.Rows), m.channelLabel())
 	if len(body) > win {
 		sub += fmt.Sprintf(" · lines %d-%d/%d · pgup/pgdn scroll", start+1, end, len(body))
 	}
+	return m.frame(sub, body[start:end], footerFor(m.w))
+}
+
+// frame is the fixed chrome every dashboard screen shares: the title, a
+// subtitle, the status bar, then the body, then the key hint pinned to the
+// last row. The body is clipped to the window, so the result is always exactly
+// m.h lines and the header and footer stay put while the body scrolls.
+func (m Model) frame(sub string, visible []string, hint string) string {
+	title := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("212"))
+	dim := lipgloss.NewStyle().Faint(true)
+	win := m.window()
+	if len(visible) > win {
+		visible = visible[:win]
+	}
+	var b strings.Builder
+	b.WriteString(m.fit(title.Render("zedrun-go — Code Runner for Zed")))
+	b.WriteString("\n")
 	b.WriteString(m.fit(dim.Render(sub)))
-	b.WriteString("\n\n")
+	b.WriteString("\n")
+	b.WriteString(m.statusLine())
+	b.WriteString("\n")
 	for _, l := range visible {
 		b.WriteString(l)
 		b.WriteString("\n")
@@ -552,18 +576,59 @@ func (m Model) View() string {
 	for i := len(visible); i < win; i++ {
 		b.WriteString("\n")
 	}
-	b.WriteString(m.fit(dim.Render(footer)))
+	b.WriteString(m.fit(dim.Render(hint)))
 	return b.String()
 }
 
-// footer is the key hint. It is kept under 80 columns on purpose: the hint is
-// rendered with fit(), which truncates, and a truncated hint is a key the user
-// never learns. `c clear` is the one key left out — clearing the output pane is
-// the least important action here, and the rest do not fit beside it.
-//
-// It fits 80 columns with room to spare, because a
-// truncated hint is a hint for the keys nobody can find.
-const footer = "r run · d doctor · u updates · U update · t pick · g get · m mouse · q quit"
+// statusLine is the one-line bar under the subtitle: the toolchain the cursor
+// is on, and how many tools are outdated. It reads only state the model already
+// holds, so rendering it never touches the network or the disk.
+func (m Model) statusLine() string {
+	dim := lipgloss.NewStyle().Faint(true)
+	warn := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("214"))
+	good := lipgloss.NewStyle().Foreground(lipgloss.Color("42"))
+
+	var parts []string
+	if len(m.Rows) == 0 {
+		parts = append(parts, dim.Render("no toolchain info yet"))
+	} else if row := m.selected(); row.Default == "-" {
+		parts = append(parts, warn.Render(row.Language+": no toolchain")+dim.Render(" (g installs one)"))
+	} else {
+		parts = append(parts, row.Language+" → "+row.Default)
+	}
+	switch {
+	case m.updatesRunning:
+		parts = append(parts, dim.Render("checking updates…"))
+	case !m.checked:
+		parts = append(parts, dim.Render("updates not checked (u)"))
+	case m.nOutdated == 0:
+		parts = append(parts, good.Render("all up to date"))
+	case len(m.upd) > 0:
+		parts = append(parts, warn.Render(fmt.Sprintf("%d outdated", m.nOutdated))+dim.Render(" (U updates)"))
+	default:
+		parts = append(parts, warn.Render(fmt.Sprintf("%d outdated", m.nOutdated))+dim.Render(" (no update route)"))
+	}
+	return m.fit(strings.Join(parts, dim.Render(" · ")))
+}
+
+// footers are the key hint, widest first. Each is a complete line, not a
+// truncation of the one above: a hint cut mid-word advertises a key the user
+// cannot read, so the dashboard picks the longest one that fits instead.
+var footers = []string{
+	"r run · d doctor · u updates · U update · t pick · g get · i zed setup · c clear · m mouse · q quit",
+	"r run · d doctor · u updates · U update · t pick · g get · i zed · m mouse · q quit",
+	"r run · d doctor · u updates · U update · t pick · g get · i zed · q quit",
+}
+
+// footerFor picks the widest hint that fits w columns.
+func footerFor(w int) string {
+	for _, f := range footers {
+		if w <= 0 || lipgloss.Width(f) <= w {
+			return f
+		}
+	}
+	return footers[len(footers)-1]
+}
 
 // Run starts the dashboard. It returns the exit code to use. The toolchain scan
 // runs inside the program, so the first frame is on screen immediately.
@@ -1126,47 +1191,115 @@ func (m Model) updateCmd(c updChoice) tea.Cmd {
 // updDoneMsg carries the outcome of an update back into the model.
 type updDoneMsg struct{ text string }
 
-// getViewUpdMenu renders the update overlay: what is outdated, and the command
-// that fixes it.
+// getViewUpdMenu renders the update overlay inside the dashboard frame: the
+// header, status bar and footer stay on screen and only the body is replaced.
+// Each outdated tool is a block — name and versions, then the command — and
+// both lines wrap rather than truncate, because the end of a command or the
+// "upstream" note is the part the user needs.
 func (m Model) getViewUpdMenu() string {
 	u := m.updMenu
-	sel := lipgloss.NewStyle().Reverse(true)
+	bold := lipgloss.NewStyle().Bold(true)
 	dim := lipgloss.NewStyle().Faint(true)
 
-	var lines []string
-	lines = append(lines, m.fit(lipgloss.NewStyle().Bold(true).Render("update toolchains")), "")
-	lines = append(lines, m.fit(dim.Render(fmt.Sprintf("%d outdated — enter runs the highlighted update", len(u.choices)))), "")
+	head := []string{
+		m.fit(bold.Render("update toolchains")),
+		m.fit(dim.Render(fmt.Sprintf("%d outdated — enter runs the highlighted update", len(u.choices)))),
+		"",
+	}
+	var rows []string
+	starts := make([]int, len(u.choices))
+	ends := make([]int, len(u.choices))
 	for i, c := range u.choices {
-		line := m.fit(fmt.Sprintf("  %-9s %-10s → %-10s %s", c.tool, c.installed, c.installTarget(), c.method.Command()))
-		if i == u.cursor {
-			line = sel.Render(line)
-		}
-		lines = append(lines, line)
+		starts[i] = len(rows)
+		rows = append(rows, m.updBlock(c, i == u.cursor)...)
+		ends[i] = len(rows)
 	}
 
-	win := m.h - 1
-	if win < 1 {
-		win = 1
+	// The heading is pinned; the blocks scroll so the highlighted one is whole.
+	room := m.window() - len(head)
+	if room < 1 {
+		room = 1
 	}
 	start := 0
-	if cur := u.cursor + 3; cur >= win {
-		start = cur - win + 1
+	if u.cursor >= 0 && u.cursor < len(u.choices) {
+		if ends[u.cursor] > room {
+			start = ends[u.cursor] - room
+		}
+		if starts[u.cursor] < start {
+			start = starts[u.cursor]
+		}
 	}
-	end := start + win
-	if end > len(lines) {
-		end = len(lines)
+	end := start + room
+	if end > len(rows) {
+		end = len(rows)
 	}
-	var b strings.Builder
-	n := 0
-	for _, l := range lines[start:end] {
-		b.WriteString(l + "\n")
-		n++
+	visible := append(head, rows[start:end]...)
+	sub := fmt.Sprintf("%s · update overlay · %s channel", m.osName(), m.channelLabel())
+	return m.frame(sub, visible, "↑/↓ select · enter update · esc cancel")
+}
+
+// wrapTo wraps s to the terminal width minus indent, for callers that add the
+// indent themselves. Wrapping the already-indented text would leave the indent
+// to the wrapper, which is free to treat leading spaces as collapsible.
+func (m Model) wrapTo(s string, indent int) []string {
+	if m.w <= 0 {
+		return []string{s}
 	}
-	for ; n < win; n++ {
-		b.WriteString("\n")
+	width := m.w - indent
+	if width < 10 {
+		width = 10
 	}
-	b.WriteString(m.fit(dim.Render("↑/↓ select · enter update · esc cancel")))
-	return b.String()
+	return strings.Split(ansi.Wrap(s, width, ""), "\n")
+}
+
+// indented puts first before the first line and rest before every other, then
+// clips each to the terminal width as a last resort for very narrow windows.
+func (m Model) indented(lines []string, first, rest string) []string {
+	out := make([]string, len(lines))
+	for i, l := range lines {
+		if i == 0 {
+			out[i] = m.fit(first + l)
+		} else {
+			out[i] = m.fit(rest + l)
+		}
+	}
+	return out
+}
+
+// updBlock renders one outdated tool as its wrapped lines. The highlighted
+// block is drawn plain and reversed as a whole: colour escapes inside a
+// reversed run would end the reverse part-way through the line.
+func (m Model) updBlock(c updChoice, selected bool) []string {
+	target := c.installTarget()
+	lag := ""
+	// The command lands the manager's version, which can trail upstream's. Say
+	// so on the row, so the arrow never promises a number the command will not
+	// install.
+	if c.achievable != "" && !versions.SameVersion(c.achievable, c.latest) {
+		lag = " (upstream " + c.latest + ")"
+	}
+	cmd := "$ " + c.method.Command()
+
+	if selected {
+		sel := lipgloss.NewStyle().Reverse(true)
+		head := fmt.Sprintf("%-9s %s → %s%s", c.tool, c.installed, target, lag)
+		lines := m.indented(m.wrapTo(head, 2), "▸ ", "  ")
+		lines = append(lines, m.indented(m.wrapTo(cmd, 4), "    ", "    ")...)
+		for i := range lines {
+			lines[i] = sel.Render(lines[i])
+		}
+		return lines
+	}
+
+	warn := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("214"))
+	good := lipgloss.NewStyle().Foreground(lipgloss.Color("42"))
+	dim := lipgloss.NewStyle().Faint(true)
+	head := warn.Render(fmt.Sprintf("%-9s", c.tool)) + " " + c.installed + " → " + good.Render(target) + dim.Render(lag)
+	lines := m.indented(m.wrapTo(head, 2), "  ", "  ")
+	for _, l := range m.indented(m.wrapTo(cmd, 4), "    ", "    ") {
+		lines = append(lines, dim.Render(l))
+	}
+	return lines
 }
 
 // doctorText renders the diagnostics report. Slow enough on a cold cache that
@@ -1191,7 +1324,7 @@ func (m *Model) checkCmd() tea.Cmd {
 	return func() tea.Msg {
 		mm := *m
 		lines, upd := mm.collectUpdates(fetcher)
-		return updatesMsg{lines: lines, upd: upd}
+		return updatesMsg{lines: lines, upd: upd, outdated: mm.nOutdated}
 	}
 }
 
@@ -1211,6 +1344,12 @@ func (m *Model) updateLines() []string {
 	if m.Pre {
 		channel = "pre"
 	}
+	m.nOutdated = 0
+	// Outdated rows stand out from the current ones; the update hint under one
+	// is a different colour so the pair reads as a row and its remedy. Each is
+	// styled as one run, so a substring search over the output still matches.
+	outdatedRow := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("214"))
+	hintRow := lipgloss.NewStyle().Foreground(lipgloss.Color("86"))
 	env, osName := m.env(), m.osName()
 	cache := m.opts.Cache
 	if cache == nil {
@@ -1261,7 +1400,12 @@ func (m *Model) updateLines() []string {
 			}
 			seenProduct[p.ID] = true
 			state, target, bump := versions.Judge(inst.Version, sources.FetchLatest(p, m.opts.Fetcher), channel)
-			lines = append(lines, fmt.Sprintf("%-8s %-12s %-12s %-11s %s", p.ID, inst.Version, target, state, bump))
+			row := fmt.Sprintf("%-8s %-12s %-12s %-11s %s", p.ID, inst.Version, target, state, bump)
+			if state == "outdated" {
+				m.nOutdated++
+				row = outdatedRow.Render(row)
+			}
+			lines = append(lines, row)
 			// "outdated" with no way to act on it is a complaint. When a manager
 			// on this machine can do the upgrade, say exactly what it would run,
 			// and keep it for the U overlay. When nothing can, say that too: a
@@ -1290,7 +1434,7 @@ func (m *Model) updateLines() []string {
 							hint += " (" + plan.Method.Manager + " lags upstream " + target + ")"
 						}
 					}
-					lines = append(lines, fmt.Sprintf("%-8s %s", "", hint))
+					lines = append(lines, hintRow.Render(fmt.Sprintf("%-8s %s", "", hint)))
 				} else if plan.Reason != "" {
 					lines = append(lines, fmt.Sprintf("%-8s %s", "", plan.Reason))
 				}
