@@ -4,6 +4,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1007,6 +1008,19 @@ func cmdGet(args []string, out, errOut io.Writer, opts Options, env map[string]s
 
 	pick, ok := pickMethod(ms, using)
 	if !ok {
+		// A URL-only (direct) method is not runnable, but it is downloadable: zedrun
+		// fetches the URL itself and shows a progress bar while it does. --yes
+		// confirms the fetch. The selected --using manager is honored: the direct
+		// route is used only when nothing else was chosen or it is the one chosen.
+		for _, d := range ms {
+			if d.Downloadable() && (using == "" || d.Manager == using) {
+				if !yes {
+					fmt.Fprintf(out, "about to download %s → %s\n\nre-run with --yes to confirm\n", d.Tool, d.URL)
+					return 0
+				}
+				return execDownload(d, out, errOut, opts, env, osName, timeout)
+			}
+		}
 		provision.Render(out, tool, ms)
 		if using != "" {
 			fmt.Fprintf(errOut, "\nno usable %s route for %s on %s\n", using, tool, osName)
@@ -1026,6 +1040,28 @@ func cmdGet(args []string, out, errOut io.Writer, opts Options, env map[string]s
 // execMethod runs a method, printing the exact command first and reporting the
 // outcome in the tool's own exit code. Elevation is decided by elevateFor, so
 // a method that cannot be elevated is explained rather than attempted.
+// execDownload fetches a URL-only (direct) method into the cache with a progress
+// bar and tells the user where it landed. It is the direct-download counterpart
+// of execMethod: there is no manager argv to elevate, so the file is simply
+// deposited and the post-install command is printed for the user.
+func execDownload(m provision.Method, out, errOut io.Writer, opts Options, env map[string]string, osName string, timeout time.Duration) int {
+	cacheDir := platform.CacheDir(env, osName)
+	dest := filepath.Join(cacheDir, "downloads", m.Tool)
+	ctx := context.Background()
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
+	_, err := provision.Download(ctx, nil, m.URL, dest, out)
+	if err != nil {
+		fmt.Fprintln(errOut, "download failed:", err)
+		return 1
+	}
+	fmt.Fprintf(out, "downloaded %s to %s\nrun it with: %s\n", m.Tool, dest, m.Note)
+	return 0
+}
+
 func execMethod(m provision.Method, verb string, out, errOut io.Writer, opts Options, env map[string]string, osName string, timeout time.Duration) int {
 	root := isRoot()
 	argv, ok, note := elevateFor(m, osName, root, env)
