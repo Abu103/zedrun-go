@@ -28,6 +28,10 @@ type Method struct {
 // method has no argv, so it can only be described.
 func (m Method) Runnable() bool { return len(m.Argv) > 0 }
 
+// Downloadable reports whether a method is a URL-only download: it has no argv,
+// so zedrun can fetch the URL itself and show a progress bar during it.
+func (m Method) Downloadable() bool { return m.URL != "" && len(m.Argv) == 0 }
+
 // Command is the exact command, or the URL when there is nothing to run.
 func (m Method) Command() string {
 	if len(m.Argv) > 0 {
