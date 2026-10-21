@@ -13,3 +13,8 @@
 # superpowers scratch workspace
 .superpowers/
 zedrun-go
+
+# deliverables / handoff scratch (built locally, not shipped in the repo)
+/zedrun-go.zip
+/HANDPASS.md
+/zedrun-ui.patch.orig.bak

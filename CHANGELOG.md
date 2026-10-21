@@ -6,8 +6,16 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Dashboard
+- Status bar under the header: the toolchain the cursor is on and how many tools are outdated (`U updates` when an update route exists). Reset when an update runs, so it never shows a stale count.
+- The update overlay (`U`) is drawn inside the dashboard frame; header, status bar and footer stay on screen. Each tool is a block of name, versions and command, wrapped rather than truncated, with the manager's own version and upstream's both shown when they differ.
+- Outdated rows in the output pane are bold amber, and the update hint beneath is coloured, so the tool that needs attention stands out.
+- The footer now lists `i` (Zed setup) and, when the terminal is wide enough, `c` (clear); it picks the longest hint that fits instead of truncating.
+- Mouse wheel no longer scrolls the hidden body while an overlay is open.
+
 ### Added
 
+- A progress bar while downloading: `get TOOL --run --yes` on a URL-only (direct) route fetches the file itself and shows a `[████░░] 100%  1.0MB / 1.0MB` bar that updates as bytes arrive, ending on its own line. When no package manager can run the tool, this is the route that lands the file.
 - `U` in the dashboard runs the update check and offers each fix; `enter` runs it
   through the same engine as `get --update`.
 - Version feeds for bash (GNU FTP), ruby, php, perl (metacpan), sqlite3, R, GHC,
