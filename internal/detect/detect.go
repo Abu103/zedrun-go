@@ -153,6 +153,19 @@ func (c *ProbeCache) Save() error {
 	return os.WriteFile(c.path, data, 0o644)
 }
 
+// ResetDirs clears the probe-result cache and the directory cache so a fresh
+// scan re-probes every tool without a stale listing. It is called once per
+// command and again after an install posts a new binary.
+func (c *ProbeCache) ResetDirs() {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.m = map[string]cacheEntry{}
+	c.dirs = nil
+}
+
 // CandidatePaths lists the executables to try for a tool, in priority order: a
 // pinned path, tool-specific dirs, PATH, well-known install dirs, then extraDirs
 // from config. Duplicates (same real path) collapse.

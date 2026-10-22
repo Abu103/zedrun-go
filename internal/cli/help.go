@@ -148,6 +148,19 @@ the g key.
 Delete the zedrun-go cache: probe results and build artifacts. The next
 run rebuilds whatever it needs.
 `,
+	"toolchain": `usage: zedrun-go toolchain SUBCOMMAND [args]
+
+Inspect and repair the toolchains on this machine.
+
+subcommands:
+  status     show every toolchain zedrun-go knows about
+  diagnose   diagnose one toolchain
+  repair     install or upgrade a toolchain
+  verify     re-verify a toolchain
+  how-to     print copy-paste install steps
+  set-path   add a directory to PATH
+  resume     resume a previous repair
+`,
 }
 
 // wantsHelp reports whether the arguments ask for help. It stops at "--", so

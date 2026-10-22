@@ -133,6 +133,8 @@ func MainWith(args []string, out, errOut io.Writer, opts Options) int {
 		return cmdClean(args[1:], out, errOut, opts, env, osName)
 	case "get":
 		return cmdGet(args[1:], out, errOut, opts, env, osName)
+	case "toolchain":
+		return cmdToolchain(args[1:], out, errOut, opts, env, osName)
 	}
 	if looksLikePath(args[0]) {
 		return cmdRun(args, out, errOut, opts, env, osName)
@@ -1193,4 +1195,4 @@ func getMissing(out, errOut io.Writer, cfg config.Config, cache *detect.ProbeCac
 // isRoot reports whether this process already has root, in which case an
 // elevated method needs no sudo. On Windows Geteuid returns -1, so an elevated
 // method there is explained rather than attempted.
-func isRoot() bool { return os.Geteuid() == 0 }
+var isRoot = func() bool { return os.Geteuid() == 0 }

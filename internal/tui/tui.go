@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -28,6 +29,36 @@ import (
 	"github.com/zedrun/zedrun-go/internal/sources"
 	"github.com/zedrun/zedrun-go/internal/versions"
 )
+
+// DirOf returns the directory part of a path using the separators of the
+// target OS, not the host's, so a Windows path is split correctly in a test
+// that runs on Linux.
+func DirOf(p, osName string) string {
+	if osName == "windows" {
+		if i := strings.LastIndexAny(p, `\/`); i >= 0 {
+			if i == 2 && len(p) > 2 && p[1] == ':' { // C:\\x -> C:\
+				return p[:3]
+			}
+			return p[:i]
+		}
+		return "."
+	}
+	return filepath.ToSlash(filepath.Dir(p))
+}
+
+// normDir folds a directory for comparison: Windows paths are case-insensitive
+// and accept either separator, and a trailing separator never matters.
+func normDir(d, osName string) string {
+	if osName == "windows" {
+		d = strings.ReplaceAll(d, "/", `\`)
+		d = strings.TrimRight(d, `\`)
+		return strings.ToLower(d)
+	}
+	if len(d) > 1 {
+		d = strings.TrimRight(d, "/")
+	}
+	return d
+}
 
 // LangRow is one line of the language table.
 type LangRow struct {
@@ -60,8 +91,9 @@ type Model struct {
 	// output you may want to copy. `m` toggles it.
 	Mouse bool
 
-	confirmInstall bool // set after an `i` preview; a second `i` applies
-	updatesRunning bool // set while an update check is in flight
+	confirmInstall   bool // set after an `i` preview; a second `i` applies
+	updatesRunning   bool // set while an update check is in flight
+	toolchainRunning bool // set while the `T` health scan is in flight
 
 	// picker is non-nil while the tool picker overlay is open.
 	picker *picker
@@ -140,6 +172,43 @@ type updChoice struct {
 	latest     string // upstream's latest
 	achievable string // what the command will actually install; "" when unknown
 	method     provision.Method
+}
+
+// toolchainMsg carries the result of a toolchain health scan into the model.
+type toolchainMsg struct {
+	lines []string
+}
+
+// toolchainScanLines probes the go toolchain and reports what the user must do.
+func toolchainScanLines(cfg config.Config, cache *detect.ProbeCache, env map[string]string, osName string) []string {
+	var lines []string
+	goTool := catalog.Tools["go"]
+	installs := detect.FindInstalls(goTool, cfg, cache, true, env, osName)
+	if len(installs) == 0 {
+		return []string{"no usable gochain found"}
+	}
+	ins := installs[0]
+	onPath := false
+	for _, d := range platform.PathEntries(env, osName) {
+		if normDir(DirOf(ins.Path, osName), osName) == normDir(d, osName) {
+			onPath = true
+			break
+		}
+	}
+	if !ins.OK {
+		lines = append(lines, "unhealthy")
+	} else if onPath {
+		if ins.Version != "" {
+			lines = append(lines, "go "+ins.Version)
+		} else {
+			lines = append(lines, "go installed")
+		}
+	} else {
+		lines = append(lines, "unhealthy")
+		lines = append(lines, "not-on-path")
+		lines = append(lines, "fix: export PATH="+DirOf(ins.Path, osName))
+	}
+	return lines
 }
 
 // installTarget is the version this choice will actually install. A manager that
@@ -277,6 +346,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.Scroll = m.bodyLen()
 		m.clamp()
 		return m, nil
+	case toolchainMsg:
+		m.toolchainRunning = false
+		m.appendLines(msg.lines)
+		m.Scroll = m.bodyLen()
+		m.clamp()
+		return m, nil
 	case tea.MouseMsg:
 		if m.picker != nil || m.prompt != nil || m.getMenu != nil || m.updMenu != nil {
 			return m, nil
@@ -305,6 +380,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		wasConfirm := m.confirmInstall
 		m.confirmInstall = false
+		if startsAction(msg.String()) {
+			m.Output = nil
+		}
 		switch msg.String() {
 		case "q", "ctrl+c", "esc":
 			m.Quitting = true
@@ -417,6 +495,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "t":
 			m.act("pick")
 			m.Scroll = m.bodyLen()
+		case "T":
+			if m.toolchainRunning {
+				m.append("toolchain: already checking")
+				m.Scroll = m.bodyLen()
+				m.clamp()
+				return m, nil
+			}
+			m.toolchainRunning = true
+			m.append("toolchain: in flight, check back soon")
+			m.Scroll = m.bodyLen()
+			m.clamp()
+			return m, func() tea.Msg {
+				return toolchainMsg{lines: toolchainScanLines(m.cfg, m.opts.Cache, m.opts.Env, m.opts.OS)}
+			}
 		case "g":
 			m.LastAction = "get"
 			m.openGetMenu()
@@ -455,7 +547,7 @@ func (m Model) body() []string {
 		lines = append(lines, dim.Render("  scanning toolchains…"))
 	}
 	for i, r := range m.Rows {
-		line := fmt.Sprintf("  %-12s %s", r.Language, r.Default)
+		line := fmt.Sprintf("  %-12s → %s", r.Language, r.Default)
 		line = m.fit(line)
 		if i == m.Cursor {
 			line = sel.Render(line)
@@ -513,9 +605,17 @@ func (m Model) fit(s string) string {
 // the right, and cutting it off is what made doctor's advice unusable.
 func (m Model) wrap(s string) []string {
 	if m.w <= 0 {
-		return []string{s}
+		return []string{outputPad + s}
 	}
-	return strings.Split(ansi.Wrap(s, m.w, ""), "\n")
+	width := m.w - len(outputPad)
+	if width <= 0 {
+		width = 1
+	}
+	lines := strings.Split(ansi.Wrap(s, width, ""), "\n")
+	for i := range lines {
+		lines[i] = outputPad + lines[i]
+	}
+	return lines
 }
 
 // View renders the dashboard, windowed to the terminal: header, a slice of the
@@ -615,8 +715,8 @@ func (m Model) statusLine() string {
 // truncation of the one above: a hint cut mid-word advertises a key the user
 // cannot read, so the dashboard picks the longest one that fits instead.
 var footers = []string{
-	"r run · d doctor · u updates · U update · t pick · g get · i zed setup · c clear · m mouse · q quit",
-	"r run · d doctor · u updates · U update · t pick · g get · i zed · m mouse · q quit",
+	"r run · d doctor · u updates · U update · T health · t pick · g get · i zed setup · c clear · m mouse · q quit",
+	"r run · d doctor · u updates · U update · T health · t pick · g get · i zed · m mouse · q quit",
 	"r run · d doctor · u updates · U update · t pick · g get · i zed · q quit",
 }
 
